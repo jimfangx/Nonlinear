@@ -133,5 +133,9 @@ The script is re-runnable: it reuses existing PRs and uses a unique label per ru
 - In AI self-test mode the window is shown and focused. A hidden, never-activated app stalled the CLI call; a keychain prompt was suspected but none appeared on the passing run.
 The app toasts a note that macOS *may* ask once to allow access to the CLI's saved login (keychain). Codex CLI is wired identically but was not invoked (the user asked for Claude Code only).
 
+## Distribution build (macOS)
+`cd apps/desktop && npx tauri build --bundles app`, then `scripts/make-dmg.sh` produces `src-tauri/target/release/bundle/Nonlinear_<ver>_arm64.dmg` (about 6 MB).
+Tauri's own DMG step can fail with `hdiutil: couldn't unmount … Resource busy` (Spotlight or another app holding the temp image), which is why the plain-hdiutil script exists. Bundle identifier is `dev.nonlinear.desktop` (it was `dev.nonlinear.app`; Tauri warns about the `.app` suffix). The current build is **ad-hoc signed, arm64 only**. Public distribution needs a Developer ID signature + notarization, and Intel/universal builds need rustup targets (Rust here is from Homebrew, without rustup). The release-binary self-test passes.
+
 ## Remaining items
 None known. The user waived the manual VoiceOver/NVDA pass. Live GitHub writes and the Claude Code adapter are verified.

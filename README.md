@@ -39,3 +39,10 @@ npx wrangler deploy
 ```
 
 Then build the app with `VITE_NONLINEAR_CLOUD_URL=https://<worker>` so users get the one-click **Connect** button. If the Worker isn't on `*.workers.dev`, add its origin to the CSP in `apps/web/index.html` and to `ALLOWED_ORIGINS`.
+
+## Shipping MacOS Installer:
+```sh
+npm ci
+APPLE_SIGNING_IDENTITY=- npm run build -w @nonlinear/desktop -- --bundles app
+scripts/make-dmg.sh
+```

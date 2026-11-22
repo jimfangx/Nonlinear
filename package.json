@@ -1,0 +1,25 @@
+{
+  "name": "nonlinear",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Nonlinear: local-first, GitHub-native release and code-review workspace (see design/)",
+  "workspaces": [
+    "packages/*",
+    "apps/web",
+    "apps/desktop",
+    "services/sync"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build": "npm run build -w @nonlinear/web",
+    "dev": "npm run dev -w @nonlinear/web",
+    "desktop": "npm run dev -w @nonlinear/desktop"
+  },
+  "devDependencies": {
+    "axe-core": "^4.14.1",
+    "playwright-core": "^1.65.1",
+    "typescript": "5.9.3",
+    "vitest": "5.1.1"
+  }
+}

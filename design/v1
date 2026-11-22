@@ -1,0 +1,121 @@
+ok it seems like theres a deficit for each of these tools, so lets roll our own:
+
+
+
+refine the design doc for a desktop (and web enabled) application with the following features:
+
+
+
+a tab that allows you to create a "view" for each set of selected repos for which the logged in user is either a collaborator on or has write or admin or owner permissions. these views are various combinations of the repos that the logged in user contributes to, and for the selected subset of repos (selected when creating this view):
+
+1. shows the inbox ( - similar to github's inbox view: needs your review, your drafts, waiting for review or CI)
+2. it should automatically detect chains between these PRs or amongest the PRs in the selected set of repos. chains can be detected by a "depends on" or "chain: \<pr> \<pr> \<pr>" or "pr stack" or similar keywords in the PR description
+3. for detected chains, the top PR (last in the chain) should show a status box when we click into the PR of the status of the rest of the PRs in the chain. clicking on any PR in the chain should show that it is part of the chain and show the same status box showing the status of the rest of the chain.
+4. we should be able to create a new chain or edit the current chain (by either reording the PR order or bringing in another PR that should be part of the chain). edits to this chain or a new chain should result in a PR chain text being synced to that PR's description (at the bottom on github)
+5. clicking on the PR should open a window similar to github's PR view (with link outs to github.com). and editing things like milestone, reviewer etc should sync with github. There should be a button to open the PR in review mode (described later).
+
+
+
+a second tab that allows a individual views/repo to be created.
+
+for each view, you can select a repo to track. when tracked, that view becomes a timeline showing the progression/github head/tip of all the submodules in that repo. so something like
+
+
+
+top bar unit should be date
+
+path in the repo being tracked/submodule ----------------------\<DOT HERE highlighting which point the submodule is pinned at in the repo>-----------\<submodule tip>
+
+(a line like the above for every submodule in the tracked repo in the current view)
+
+on the right panel, we can add a vertical line which represents the next release, and that line is a particular color and for each segment of the vertical line when it intersects with a horizontal row, we can drag that line to a point that highlights the desired submodule pin we want the next release to be at.
+
+
+
+if submodules exists in the submodule of a repo that a view is currently tracking, you should be able to click the submodule, which should open another view if it exists tracking the submodules in that repo, otherwise just point to github of that submodule. (ex: chipyard's generators/gemmini submodule submodules of its own, so clicking on the generators/gemmini row in the chipyard view sholuld open the gemmini view tracking its submodules, if that view has been created already).
+
+
+
+you should be able to split screen (horiziontally) view 2 views, aligned by date. so we can see that in order to bump the chipyard gemmini submodule we need to also bump the subsequent XYZ submodules in the gemmini repo.&#x20;
+
+
+
+releases should be universal across views
+
+
+
+
+
+another tab that implements a basic kanban board. board views can be either shown by repository or a release (which is globally shared). cards are shared (ie they are created and either tagged to a repo/created on that repo's view, or created on a release view/tagged to that release), it shows up in different kanban columns depending on which view the user is on.
+
+
+
+cards are features, and may involve PR stacks (so it is not 1 PR/card model).
+
+
+
+this doesn't need to be synced to github.
+
+
+
+
+
+the review tab -- can be reached via clicking on a PR in the previous tabs or on this page... if selecting a PR on this page, we should be able to select a repo (that we have permissions to write to), it lists all the PRs, just like github's PR page.
+
+if this PR is part of a PR chain/stack (whether from within our app or from github), the stack should show on the right, and we should be able to click on a PR in that stack and go to that PR (ie allow us to start reviewing from the bottom of the stack to the top/last PR). In addition, if part of a PR stack, the diff should expand to the changes in the submodule as well.
+
+
+
+the review page will take a bit of a different approach. when we click on the overview section, there should be an AI summary that appears at the top (app should give us a place to put Codex,Claude,Antigravity, openrouter/major LLM provider keys -- summaries should be cached as long as new changes are not introduced to the PR which requires a re-summary).&#x20;
+
+
+
+our design should be designed to handle large diffs.. when we click on the Files Changed/Diffs section. we'll still see buttons to summarize each file's changes using LLM. we should be able to add notes (not comments) on each file changed, or on each line (in addition to comments, which should be synced to github).
+
+
+
+unlike github, "viewed" button should say "reviewed", and additional button "Postpone review"/"review incomplete" can be checked signaling a "come back later".
+
+
+
+using tools like [https://github.com/colbymchenry/codegraph](https://github.com/colbymchenry/codegraph) we should have a button per file changed to show that change's impact in the code graph. code graphs should be cached.
+
+
+
+each file should have a horizontal line (users drag it down as they review the changes in that file, until they reach the end, at which point if the bar is at the end, the file is reviewed), however users should also be able to uncheck lines or chunks of lines (via shift) to mark certain lines as "come back later"/"review incomplete" lines. if no part of it is started or the bar is dragged half way, then the file is marked as review incomplete.
+
+
+
+expanding a hidden code block (because nothing changed) should expand up to a reasonable spot like function defintiion, and when expanding down should go to the end of a function or block (this probably requires some semantic analysis/LSP on that particular file)
+
+
+
+each file should have a pop up feature to view the entire file. at this point we should also be able to split screen (horizontally or vertically) with another file (either in the upstream repo or another file in the PR).
+
+
+
+another tab which is a diff viewer for a diff that spans across submodules. pick a master module with the submodules, and supply a .json based diff, and a diff viewer (similar to [https://www.diffchecker.com/](https://www.diffchecker.com/)) should show the diff across submodules of that master repo (example diff json is applied, can be big.. up to megabytes)
+
+
+
+final tab: gitkraken like git tree, one view per repo.
+
+
+
+design language: dark/light mode, similar to linear.app, [https://graphite.com/](https://graphite.com/), keyboard first. fast, can use GPU acceleration if needed.
+
+
+
+can operate locally or processing can be offloaded to another machine via SSH (espeically if we need to point it at an active chipyard repo, but try to avoid this if possible).
+
+
+
+database: local + live synced with a cloud db (not sure which one, ideally free, but if we need the capacity or performance, give me paid options as well). local + online to ensure that we can still open the app when we lose internet
+
+
+
+LLM features target no more than $100 codex API spend a month when picking models -- so dont pick something like astra lol
+
+
+
+authentication: github. should not require org level approval/access. for features that require github write, it should be only limited to repos i have write access to on my account. also when auth-ing, don't give an auth link with unlimited personal account scope, scope it to what is just needed.

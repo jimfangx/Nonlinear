@@ -1,0 +1,136 @@
+# Maintainer Workbench
+
+*Local-first GitHub integration, release planning, and human code review*
+
+**Status:** Proposed · Version 0.2
+
+## Product objective
+
+Build a fast, keyboard-first application that consolidates repository maintenance, GitHub pull request review, multi-repository dependencies, nested Git submodule tracking, and release preparation.
+
+The application targets maintainers who coordinate work across GitHub organizations they may not own. It must remain useful without organization-wide GitHub App installation, without introducing a fixed development cadence, and without requiring contributors to adopt the application.
+
+GitHub remains the authoritative source for PRs, reviews, comments, and repository state. The application independently manages personal planning, private review progress, notes, and release targets.
+
+## Primary workspaces
+
+### 1. Pull Request Inbox
+
+Users create named views containing arbitrary subsets of repositories on which they collaborate or have write, maintain, or administrative permissions.
+
+Each view provides an aggregate inbox with filters for review requests, draft PRs, outstanding reviews, failing or pending CI, blocked dependencies, and merge-ready changes.
+
+Detect dependency chains from GitHub PR descriptions, including `Depends-On`, `Chain`, and `PR Stack` declarations. Represent chains internally as directed acyclic graphs, supporting both linear stacks and branching dependencies.
+
+Every member of a chain displays the same chain-status panel, highlighting the current PR. Users can reorder chains, add or remove members, or create new chains.
+
+Chain modifications synchronize to managed Markdown blocks in GitHub PR descriptions wherever write permissions are available. Changes involving inaccessible upstream repositories remain available locally and are clearly marked as not synchronized. Synchronization to upstream requires user confirmation before changes are made on GitHub.
+
+The PR details panel mirrors GitHub's metadata and supports authorized updates to reviewers, milestones, labels, and descriptions. Users can open any PR in the integrated review workspace.
+
+### 2. Submodule Timeline and Release Manager
+
+Users create timeline views for individual tracked repositories.
+
+Each view shows Git submodule paths in rows with calendar dates across the horizontal axis, exact pinned revisions, upstream commit history, branch tips, and tags.
+
+A globally defined release is represented by a colored segmented vertical line. Each row intersection has a draggable target-revision handle. Moving the handle selects a desired submodule commit without immediately editing the repository.
+
+Nested submodules support navigation into child repository views. Two views may be displayed in a horizontally split workspace with synchronized date axes, allowing users to correlate parent and child revision requirements.
+
+Release manifests are shared across views and store exact repository and submodule revision targets. Draft manifests can be validated, compared against existing releases, exported, or converted into proposed Git changes.
+
+No release dates are required.
+
+### 3. Feature Kanban
+
+A local-first kanban workspace contains feature cards that may reference several PRs, chains, repositories, and releases.
+
+Repository and release boards display shared cards but maintain independent column placement and ordering. This allows one feature to be, for example, under active development in a repository board while awaiting release qualification in the global release board.
+
+Cards support descriptions, checklists, private notes, linked PRs, dependencies, and repository/release tags.
+
+No GitHub Issues or Projects synchronization is required.
+
+### 4. Human Code Review
+
+The review workspace includes a GitHub-like PR overview, changed files, commits, conversation, and contextual PR chain panel.
+
+Users can navigate a PR chain from its earliest prerequisites through its downstream integration changes. Gitlink updates can expand into the actual submodule source changes, showing the compared repository and commit revisions.
+
+The overview provides cached AI summaries of intent, technical changes, risks, and validation. Each file also supports on-demand AI summarization.
+
+Review progress is more detailed than GitHub's Viewed flag. A per-file draggable frontier represents the reviewed prefix; users can mark individual lines or hunks for later review. A file is only considered reviewed when all applicable content has been inspected and no incomplete ranges remain.
+
+Review state, unfinished work, and private notes persist across sessions and are reconciled with subsequent PR revisions. Modified or ambiguous code is automatically flagged for re-review.
+
+GitHub comments, suggestions, approvals, and review submissions synchronize with GitHub. Private notes and the additional review-progress metadata remain application-owned.
+
+Semantic context expansion identifies enclosing functions or code blocks. A full-file inspector supports split views of files from the current PR or related upstream repositories.
+
+CodeGraph and language-server integrations provide symbol relationships, impact analysis, and affected-code exploration. Indexes and outputs are cached by repository revision.
+
+### 5. Multi-Repository Diff Viewer
+
+Users select a root repository and load a JSON diff containing unified patches keyed by submodule path.
+
+The root path is represented by an empty string key. Each submodule appears as a separate navigable group, with side-by-side and unified diff modes, search, path filtering, and changed-file statistics.
+
+The diff viewer supports new/deleted files, renames, empty entries, large patches, and offline navigation.
+
+Large imports are parsed incrementally outside the UI thread, with virtualized rendering and bounded memory.
+
+### 6. Git Graph
+
+Each repository has a GitKraken-style commit graph displaying branches, tags, merges, commit ancestry, and linked PRs.
+
+The graph integrates with the release manager and review workspace, allowing navigation from a submodule pin to its commit history or from a Git commit to relevant changes.
+
+Repository history is loaded incrementally and may use local Git mirrors, GitHub APIs, or an SSH-connected compute agent.
+
+## Application architecture
+
+**Frontend:** React, TypeScript, Tauri 2 desktop shell, installable PWA, virtualized lists, shared keyboard-first navigation.
+
+**Local core:** Rust and SQLite, with Git operations, diff parsing, semantic indexing, content-addressed caches, and durable offline data.
+
+**Cloud:** Optional encrypted metadata synchronization, initially using Cloudflare Workers and D1. Large code caches, Git repositories, model credentials, and semantic indexes remain local by default.
+
+**Remote execution:** Optional SSH connection to an existing working tree or unprivileged helper. Avoid cloning the full Chipyard dependency tree when GitHub metadata and on-demand Git object retrieval are sufficient.
+
+**Authentication:** Personal GitHub OAuth. Public repository access is the default; additional permissions require explicit user consent. Never request broad private-repository access simply to enable public-repository review. Repository writes require both granted GitHub capabilities and a fresh permission check.
+
+**AI:** Provider-neutral support for OpenAI/Codex API models, Anthropic, Gemini, OpenRouter, and optional local models. Cache outputs against exact code revisions, use inexpensive models by default, and enforce an application-side monthly OpenAI API budget of no more than $100.
+
+## Design principles
+
+- Local-first: the application remains useful when disconnected.
+- GitHub-compatible: ordinary contributors do not need the application.
+- No organizational installation requirement: upstream public repositories remain readable without owner cooperation.
+- Explicit write authority: never silently modify an upstream repository or PR.
+- Release readiness over schedules: integration decisions are based on compatibility and validation, not deadlines.
+- Human-centered review: preserve a maintainer's understanding, notes, and progress across long-lived PRs.
+- Large-repository performance: use incremental retrieval, virtualization, content-addressed caching, and optional remote indexing.
+- Keyboard-first navigation, persistent split panes, and accessible light/dark themes.
+
+## Implementation order
+
+**Foundation:** Desktop/web shell, public-only GitHub authentication, repository views, SQLite, and cloud synchronization.
+
+**Maintainer workflows:** PR inbox, chain detection and editing, GitHub metadata synchronization, basic reviews, and kanban.
+
+**Release workflows:** Submodule timelines, nested split views, globally shared release manifests, and gitlink reconciliation.
+
+**Advanced reviews:** Revision-aware review progress, semantic code expansion, CodeGraph integration, and AI summaries.
+
+**Advanced repository exploration:** Multi-repository JSON diff import, Git graph, and optional SSH execution.
+
+Each phase should be evaluated using real multi-repository Chipyard workflows and large Scala/Chisel changes rather than artificial small-repository examples.
+
+## Success criteria
+
+A maintainer can sign in without installing a GitHub App into any organization, select multiple public repositories across organizations, review and organize their outstanding PRs, inspect complete cross-repository dependency chains, and maintain a globally consistent release plan.
+
+The maintainer can interrupt and resume large code reviews without losing progress, inspect submodule changes as source diffs, and prepare release pin updates without manually navigating dozens of repository histories.
+
+All of this works without imposing new workflows on upstream contributors, while preserving GitHub's standard review and collaboration behavior.

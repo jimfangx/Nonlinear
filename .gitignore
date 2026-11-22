@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.wrangler/
+target/
+*.log
+.DS_Store
+apps/desktop/src-tauri/gen/
+scripts/.live.env

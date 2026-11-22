@@ -4,7 +4,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { layoutLanes, indexPatch, type CommitNode } from "@nonlinear/core";
 import { useApp } from "../lib/store";
 import { githubApi, describeError } from "../lib/github";
-import { gitlinksAt } from "../lib/timeline";
+import { gitlinksAt, remoteGitRefs, remoteGitLog, usesGitTransport } from "../lib/timeline";
 import { isDesktop, invoke } from "../lib/platform";
 import { availableSources, gitDiff, gitGitlinks, gitLog, gitRefs, sourceLabel, type Source } from "../lib/sources";
 import { FileDiff } from "../components/FileDiff";
@@ -29,24 +29,58 @@ export function GitGraph() {
   const { owner, repo } = useParams();
   const views = useApp((s) => s.views);
   const nav = useNavigate();
+  const layout = useApp((state) => state.settings_().layout);
+  const pinned = (layout.graphPinned as string[] | undefined) ?? [];
+  const recent = (layout.graphRecent as string[] | undefined) ?? [];
+  const visits = (layout.graphVisits as Record<string, number> | undefined) ?? {};
+  const openRepo = (repo: string) => { showSuggestions(false); nav(`/graph/${repo}`); };
   const repos = useMemo(() => [...new Set(Object.values(views).flatMap((v) => v.repos))].sort(), [views]);
+  const [suggestions, showSuggestions] = useState(false);
   const [input, setInput] = useState(owner && repo ? `${owner}/${repo}` : repos[0] ?? "");
-  const [localPath, setLocalPath] = useState("");
   const key = owner && repo ? `${owner}/${repo}`.toLowerCase() : null;
+  useEffect(() => {
+    if (!key) return;
+    setInput(key);
+    const state = useApp.getState();
+    const saved = state.settings_().layout;
+    const history = (saved.graphRecent as string[] | undefined) ?? [];
+    const counts = (saved.graphVisits as Record<string, number> | undefined) ?? {};
+    if (history[0] !== key || !counts[key]) {
+      state.setSettings({ layout: { ...saved, graphRecent: [key, ...history.filter((repo) => repo !== key)].slice(0, 12),
+        graphVisits: { ...counts, [key]: (counts[key] ?? 0) + 1 } } });
+    }
+  }, [key]);
+  const ranked = [...new Set([...recent, ...repos])].sort((a, b) => (visits[b] ?? 0) - (visits[a] ?? 0));
+  const shortcuts = [...new Set([...pinned, ...ranked])].slice(0, Math.max(5, pinned.length));
+  const togglePin = (repo: string) => {
+    const state = useApp.getState();
+    state.setSettings({ layout: { ...state.settings_().layout, graphPinned: pinned.includes(repo) ? pinned.filter((value) => value !== repo) : [...pinned, repo] } });
+  };
   return (
     <div className="col" style={{ height: "100%", gap: 0 }}>
-      <div className="toolbar">
+      <form className="toolbar graph-picker" onSubmit={(e) => { e.preventDefault(); if (/^[^/\s]+\/[^/\s]+$/.test(input.trim())) openRepo(input.trim()) }}>
         <h1 className="toolbar-title">Git Graph</h1>
-        <input className="input" list="graph-repos" value={input} onChange={(e) => setInput(e.target.value)} placeholder="owner/repo" onKeyDown={(e) => e.key === "Enter" && nav(`/graph/${input}`)} />
-        <datalist id="graph-repos">
-          {repos.map((r) => (
-            <option key={r} value={r} />
-          ))}
-        </datalist>
-        <button className="btn sm" onClick={() => nav(`/graph/${input}`)}>
-          Open (GitHub)
+        <div className="graph-repo-input" onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) showSuggestions(false); }}>
+          <input className="input" value={input} onFocus={() => showSuggestions(true)}
+            onChange={(e) => { setInput(e.target.value); showSuggestions(true); }}
+            onKeyDown={(e) => { if (e.key === "Escape") showSuggestions(false); }}
+            placeholder="owner/repo" aria-label="Repository" autoComplete="off" />
+          {suggestions && repos.some((repo) => repo !== input && repo.includes(input.toLowerCase())) && (
+            <div className="panel graph-repo-menu" role="group" aria-label="Matching repositories">
+              {repos.filter((repo) => repo !== input && repo.includes(input.toLowerCase())).map((repo) => (
+                <button type="button" className="btn ghost" key={repo} onClick={() => { setInput(repo); showSuggestions(false); }}>{repo}</button>
+              ))}
+            </div>
+          )}
+        </div>
+        <button type="submit" className="btn">
+          Open
         </button>
-      </div>
+        {shortcuts.map((repo) => <span className={`graph-shortcut ${repo === key ? "selected" : ""}`} key={repo}>
+          <button type="button" onClick={() => openRepo(repo)} title={repo}>{repo.split("/").at(-1)}</button>
+          <button type="button" onClick={() => togglePin(repo)} aria-pressed={pinned.includes(repo)} aria-label={`${pinned.includes(repo) ? "Unpin" : "Pin"} ${repo}`} title={`${pinned.includes(repo) ? "Unpin" : "Pin"} ${repo}`}>{pinned.includes(repo) ? "★" : "☆"}</button>
+        </span>)}
+      </form>
       {key ? <Graph key={key} repoKey={key} /> : <div className="empty">Choose a repository.</div>}
     </div>
   );
@@ -55,7 +89,8 @@ export function GitGraph() {
 function Graph({ repoKey }: { repoKey: string }) {
   const [owner, name] = repoKey.split("/") as [string, string];
   const sources = useMemo(() => availableSources(repoKey), [repoKey]);
-  const [src, setSrc] = useState<Source>(sources[0]!);
+  const [src, setSrc] = useState<Source>(sources.find((source) => source.kind === "local") ?? sources[0]!);
+  const remoteGit = usesGitTransport(src);
   const local = src.kind === "local" ? src.path : null;
   const [commits, setCommits] = useState<CommitNode[]>([]);
   const [refs, setRefs] = useState<Ref[]>([]);
@@ -76,6 +111,13 @@ function Graph({ repoKey }: { repoKey: string }) {
         if (src.kind !== "github") {
           const rs = await gitRefs(src);
           setRefs(rs.map((r) => ({ name: r.name, sha: r.sha, kind: r.kind === "tag" ? "tag" : "branch" })));
+        } else if (remoteGit) {
+          const { branch, branches, tags } = await remoteGitRefs(repoKey);
+          setRefs([
+            ...branches.map(([name, sha]) => ({ name, sha, kind: "branch" as const })),
+            ...tags.map(([name, sha]) => ({ name, sha, kind: "tag" as const })),
+          ]);
+          setSelectedBranches(branch ? [branch] : []);
         } else {
           const c = await githubApi();
           const [info, br, tg] = await Promise.all([c.repo(owner, name), c.branches(owner, name), c.tags(owner, name)]);
@@ -88,7 +130,7 @@ function Graph({ repoKey }: { repoKey: string }) {
         setBusy(null);
       }
     })();
-  }, [repoKey, JSON.stringify(src)]);
+  }, [repoKey, JSON.stringify(src), remoteGit]);
 
   useEffect(() => {
     if (!selectedBranches.length && src.kind === "github") return;
@@ -97,7 +139,9 @@ function Graph({ repoKey }: { repoKey: string }) {
       try {
         let all: CommitNode[] = [];
         if (src.kind !== "github") all = await gitLog(src, "--all", pages * 200);
-        else {
+        else if (remoteGit) {
+          for (const branch of selectedBranches) all.push(...await remoteGitLog(repoKey, `refs/heads/${branch}`, pages * 200));
+        } else {
           const c = await githubApi();
           for (const b of selectedBranches) all.push(...(await c.commits(owner, name, { sha: b, pages })));
         }
@@ -109,7 +153,7 @@ function Graph({ repoKey }: { repoKey: string }) {
         setBusy(null);
       }
     })();
-  }, [selectedBranches.join(","), pages, JSON.stringify(src)]);
+  }, [selectedBranches.join(","), pages, JSON.stringify(src), remoteGit]);
 
   const { rows, maxLane } = useMemo(() => layoutLanes(commits), [commits]);
   const refsBySha = useMemo(() => {
@@ -166,21 +210,21 @@ function Graph({ repoKey }: { repoKey: string }) {
         <select className="input" aria-label="Data source" value={JSON.stringify(src)} onChange={(e) => setSrc(JSON.parse(e.target.value) as Source)}>
           {sources.map((x) => (
             <option key={JSON.stringify(x)} value={JSON.stringify(x)}>
-              {sourceLabel(x)}
+              {x.kind === "github" ? "GitHub" : sourceLabel(x)}
             </option>
           ))}
         </select>
         <span className="faint">
-          {commits.length} commits loaded · {sourceLabel(src)}
+          {commits.length} commits loaded · {src.kind === "github" ? "GitHub" : sourceLabel(src)}
         </span>
-        <button className="btn sm" onClick={() => setPages((p) => p + 1)} disabled={!!busy}>
+        <button className="btn sm" onClick={() => setPages((p) => p + 1)} disabled={!!busy || (remoteGit && pages >= 25)}>
           Load more
         </button>
         {busy && <span className="faint">{busy}</span>}
       </div>
       {err && <div className="banner err">{err}</div>}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <Split id="gitgraph" initial={0.64}>
+        <Split id="gitgraph" className="graph-split" initial={0.64}>
           <div ref={parentRef} style={{ height: "100%", overflow: "auto" }}>
             <div style={{ height: virt.getTotalSize(), position: "relative" }}>
               {virt.getVirtualItems().map((vi) => {
@@ -252,7 +296,7 @@ function CommitDetail({ repoKey, c, refs, local, src }: { repoKey: string; c: Co
   useEffect(() => {
     setCmp(null);
     setLinks(null);
-    void (src.kind === "github" ? gitlinksAt(repoKey, c.sha) : gitGitlinks(src, c.sha)).then(setLinks).catch(() => setLinks(new Map()));
+    void (src.kind === "github" ? gitlinksAt(repoKey, c.sha, src) : gitGitlinks(src, c.sha)).then(setLinks).catch(() => setLinks(new Map()));
   }, [c.sha, repoKey]);
   const tl = Object.values(timelines).find((t) => t.root === repoKey);
   return (

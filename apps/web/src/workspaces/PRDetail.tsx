@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { parsePRKey, newId, type FeatureCard } from "@nonlinear/core";
 import { useApp } from "../lib/store";
-import { cachedCapabilities, enrichPR, updatePRFields, describeError, WriteBlocked } from "../lib/github";
+import { cachedCapabilities, ensurePR, enrichPR, updatePRFields, describeError, WriteBlocked } from "../lib/github";
 import { renderMarkdown } from "../lib/markdown";
 import { ChainPanel } from "../components/ChainPanel";
 import { CIChip, ReviewChip, PRStateChip, timeAgo, Modal } from "../components/ui";
@@ -14,16 +14,26 @@ export function PRDetail({ prKey }: { prKey: string }) {
   const online = useApp((s) => s.online);
   const [editing, setEditing] = useState<null | "body" | "labels" | "reviewers">(null);
   const [linkCard, setLinkCard] = useState(false);
-  const r = parsePRKey(prKey)!;
-  const repoKey = `${r.owner}/${r.repo}`.toLowerCase();
+  const r = parsePRKey(prKey);
+  const repoKey = r ? `${r.owner}/${r.repo}`.toLowerCase() : "";
+  const [loading, setLoading] = useState(false);
   const caps = cachedCapabilities(repoKey);
 
   useEffect(() => {
-    if (pr && online && (pr.reviewDecision === "unknown" || Date.now() - pr.fetchedAt > 5 * 60_000)) void enrichPR(prKey).catch(() => undefined);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prKey]);
+    if (!r || !online || pr) return;
+    let cancelled = false;
+    setLoading(true);
+    void ensurePR(prKey).finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [prKey, online, !!pr]);
 
-  if (!pr) return <div className="empty">PR not cached.</div>;
+  useEffect(() => {
+    if (!pr || !online || (pr.reviewDecision !== "unknown" && pr.ci !== "unknown")) return;
+    const timer = window.setTimeout(() => void enrichPR(prKey).catch(() => undefined), 450);
+    return () => window.clearTimeout(timer);
+  }, [prKey, online, !!pr]);
+
+  if (!pr) return <div className="empty">{loading ? "Loading PR…" : "Pull request unavailable."}</div>;
   return (
     <div className="pad col" style={{ gap: 12 }}>
       <div>
@@ -51,7 +61,7 @@ export function PRDetail({ prKey }: { prKey: string }) {
         </div>
       </div>
       <div className="row" style={{ flexWrap: "wrap" }}>
-        <Link className="btn primary" to={`/pr/${pr.owner}/${pr.repo}/${pr.number}`}>
+        <Link className="btn primary" to={`/review/${pr.owner}/${pr.repo}/${pr.number}`}>
           Open in Review
         </Link>
         <a className="btn" href={pr.url} target="_blank" rel="noreferrer">

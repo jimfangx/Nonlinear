@@ -8,6 +8,7 @@ import {
   freshness,
   parsePRKey,
   prKey as mkKey,
+  newId,
   prProgress,
   toSnapshot,
   type CommitNode,
@@ -84,13 +85,13 @@ export function ReviewHome() {
         <input className="input" placeholder="Open any PR: owner/repo#123 or URL" value={goto} onChange={(e) => setGoto(e.target.value)} onKeyDown={(e) => {
           if (e.key !== "Enter") return;
           const m = /([^/\s]+)\/([^/\s#]+)(?:#|\/pull\/)(\d+)/.exec(goto);
-          if (m) nav(`/pr/${m[1]}/${m[2]}/${m[3]}`);
+          if (m) nav(`/review/${m[1]}/${m[2]}/${m[3]}`);
         }} style={{ width: 300 }} />
       </div>
       {err && <div className="banner err">{err}</div>}
       <div className="panel">
         {list.map((p) => (
-          <Link key={p.key} to={`/pr/${p.owner}/${p.repo}/${p.number}`} className="list-row" style={{ color: "inherit", textDecoration: "none" }}>
+          <Link key={p.key} to={`/review/${p.owner}/${p.repo}/${p.number}`} className="list-row" style={{ color: "inherit", textDecoration: "none" }}>
             <ReviewProgressPill pr={p} />
             <div className="grow" style={{ minWidth: 0 }}>
               <div className="ellipsis">{p.title}</div>
@@ -108,11 +109,12 @@ export function ReviewHome() {
 
 function ReviewProgressPill({ pr }: { pr: PRSnapshot }) {
   const p = useApp((s) => s.reviews[pr.key]);
-  if (!p) return <span className="chip" style={{ width: 64 }}>not started</span>;
+  if (!p) return <span className="chip review-progress-pill">Not started</span>;
   const g = prProgress(p);
+  const total = Math.max(pr.changedFiles, g.total);
   return (
-    <span className={`chip ${g.stale ? "err" : g.complete === g.total && g.total ? "ok" : "warn"}`} style={{ width: 64 }} title="Private review progress">
-      {g.complete}/{g.total}{p.headSha !== pr.headSha ? " ⟳" : ""}
+    <span className={`chip ${g.stale ? "err" : g.complete === total && total ? "ok" : "warn"} review-progress-pill`} title={`${g.complete} of ${total} changed files reviewed privately`}>
+      {g.complete}/{total}{p.headSha !== pr.headSha ? " ⟳" : ""}
     </span>
   );
 }
@@ -125,10 +127,12 @@ export function ReviewPR() {
   const { owner, repo, number, tab } = useParams();
   const key = mkKey({ owner: owner!, repo: repo!, number: Number(number) });
   const pr = useApp((s) => s.prs[key]);
+  const progress = useApp((s) => s.reviews[key]);
   const toast = useApp((s) => s.toast);
   const nav = useNavigate();
   const [diff, setDiff] = useState<LoadedDiff | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [commentRevision, setCommentRevision] = useState(0);
   const [remapInfo, setRemapInfo] = useState<string | null>(null);
   const activeTab = (tab as Tab) ?? "files";
   const { graph } = useChainGraph();
@@ -172,13 +176,12 @@ export function ReviewPR() {
     const crumbs: string[] = JSON.parse(sessionStorage.getItem("nl:crumbs") ?? "[]");
     sessionStorage.setItem("nl:crumbs", JSON.stringify([...crumbs.filter((c) => c !== key), key].slice(-8)));
     const r = parsePRKey(next)!;
-    nav(`/pr/${r.owner}/${r.repo}/${r.number}/${activeTab}`);
+    nav(`/review/${r.owner}/${r.repo}/${r.number}/${activeTab}`);
   };
   useActions({ chainPrev: () => goChain(-1), chainNext: () => goChain(1) }, [chainOrder.join(), key, activeTab]);
   const crumbs: string[] = JSON.parse(sessionStorage.getItem("nl:crumbs") ?? "[]").filter((c: string) => c !== key);
 
   if (!pr) return <div className="empty">{err ?? "Loading PR…"}</div>;
-  const progress = useApp.getState().reviews[key];
   const paused = progress?.phase === "paused";
 
   return (
@@ -224,11 +227,14 @@ export function ReviewPR() {
             const cur = st.reviews[key] ?? { prKey: key, headSha: pr.headSha, baseSha: pr.baseSha, phase: "active" as const, files: {}, updatedAt: Date.now() };
             st.put("reviews", key, { ...cur, phase: paused ? "active" : "paused", updatedAt: Date.now() });
           }}
-          title="Private state; not visible on GitHub"
+          aria-pressed={paused}
+          title="Record that you are stepping away. Your review progress and GitHub status stay as they are."
         >
-          {paused ? "▶ Resume review" : "⏸ Review paused"}
+          {paused ? "▶ Resume review" : "⏸ Pause review"}
         </button>
-        <SubmitReviewButton pr={pr} />
+        <PRNotesButton pr={pr} />
+        <button className="btn sm" onClick={() => nav(`/review/${owner}/${repo}/${number}/conversation`)}>PR comment</button>
+        <SubmitReviewButton pr={pr} onSubmitted={() => setCommentRevision((revision) => revision + 1)} />
         <a className="btn sm" href={pr.url} target="_blank" rel="noreferrer">
           GitHub ↗
         </a>
@@ -238,11 +244,12 @@ export function ReviewPR() {
       </div>
       <div className="tabs" role="tablist">
         {(["overview", "files", "commits", "conversation"] as Tab[]).map((t) => (
-          <button key={t} role="tab" aria-selected={activeTab === t} className={`tab ${activeTab === t ? "active" : ""}`} onClick={() => nav(`/pr/${owner}/${repo}/${number}/${t}`)}>
+          <button key={t} role="tab" aria-selected={activeTab === t} className={`tab ${activeTab === t ? "active" : ""}`} onClick={() => nav(`/review/${owner}/${repo}/${number}/${t}`)}>
             {t === "files" ? `Files changed ${diff ? diff.index.files.length : ""}` : t[0]!.toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
+      {paused && <div className="banner info" role="status">Review paused. Your progress is saved locally.</div>}
       {remapInfo && (
         <div className="banner warn" style={{ margin: 8 }}>
           {remapInfo}{" "}
@@ -254,12 +261,34 @@ export function ReviewPR() {
       {err && <div className="banner err" style={{ margin: 8 }}>{err}</div>}
       <div style={{ flex: 1, minHeight: 0 }}>
         {activeTab === "overview" && <Overview pr={pr} diff={diff} />}
-        {activeTab === "files" && (diff ? <ReviewFiles pr={pr} diff={diff} /> : <div className="empty">{err ? "" : "Loading diff…"}</div>)}
+        {activeTab === "files" && (diff ? <ReviewFiles pr={pr} diff={diff} refreshComments={commentRevision} /> : <div className="empty">{err ? "" : "Loading diff…"}</div>)}
         {activeTab === "commits" && <Commits pr={pr} />}
         {activeTab === "conversation" && <Conversation pr={pr} />}
       </div>
     </div>
   );
+}
+
+function PRNotesButton({ pr }: { pr: PRSnapshot }) {
+  const [open, setOpen] = useState(false);
+  const [body, setBody] = useState("");
+  const notes = useApp(useShallow((state) => Object.values(state.notes).filter((note) => note.prKey === pr.key && !note.anchor)));
+  const save = () => {
+    if (!body.trim()) return;
+    const id = newId("note");
+    useApp.getState().put("notes", id, { id, prKey: pr.key, headSha: pr.headSha, anchor: null, body: body.trim(), orphaned: false, createdAt: Date.now(), updatedAt: Date.now() });
+    setBody("");
+  };
+  return <>
+    <button className="btn sm" onClick={() => setOpen(true)}>PR notes{notes.length ? ` (${notes.length})` : ""}</button>
+    {open && <Modal title="Private PR notes" onClose={() => setOpen(false)}>
+      <div className="col">
+        {notes.map((note) => <div key={note.id} className="panel pad inline-annotation">{note.body}</div>)}
+        <textarea className="input" aria-label="PR-level private note" placeholder="Private note about this pull request" value={body} onChange={(e) => setBody(e.target.value)} />
+        <button className="btn primary" disabled={!body.trim()} onClick={save}>Save PR note</button>
+      </div>
+    </Modal>}
+  </>;
 }
 
 /* ---------------- Overview + AI summary (§5.2) ---------------- */
@@ -526,7 +555,7 @@ function Conversation({ pr }: { pr: PRSnapshot }) {
 
 /* ---------------- Submit review (GitHub's actual API) ---------------- */
 
-function SubmitReviewButton({ pr }: { pr: PRSnapshot }) {
+function SubmitReviewButton({ pr, onSubmitted }: { pr: PRSnapshot; onSubmitted: () => void }) {
   const drafts = useApp(useShallow((s) => Object.values(s.drafts).filter((d) => d.prKey === pr.key)));
   const [open, setOpen] = useState(false);
   const [event, setEvent] = useState<"COMMENT" | "APPROVE" | "REQUEST_CHANGES">("COMMENT");
@@ -570,6 +599,7 @@ function SubmitReviewButton({ pr }: { pr: PRSnapshot }) {
                     else {
                       valid.forEach((d) => remove("drafts", d.id));
                       toast("success", "Review submitted to GitHub");
+                      onSubmitted();
                       setOpen(false);
                       void enrichPR(pr.key);
                     }

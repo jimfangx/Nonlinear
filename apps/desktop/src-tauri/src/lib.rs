@@ -137,6 +137,13 @@ async fn codegraph(repo_path: String, sub: String, symbol: String) -> Res<String
     tauri::async_runtime::spawn_blocking(move || remote::codegraph_local(&r, &sub, &symbol)).await.map_err(e)?.map_err(e)
 }
 
+#[tauri::command]
+async fn codegraph_lineage(repo_path: String, direction: String, symbol: String, file: String) -> Res<serde_json::Value> {
+    let root = git::validate_repo(&repo_path).map_err(e)?;
+    tauri::async_runtime::spawn_blocking(move || remote::codegraph_lineage(&root, &direction, &symbol, &file))
+        .await.map_err(e)?.map_err(e)
+}
+
 /* ---------------- GitHub OAuth device flow (no client secret in the binary) ---------------- */
 
 #[derive(Serialize, serde::Deserialize)]
@@ -206,6 +213,22 @@ async fn mirror_ensure(app: tauri::AppHandle, repo_key: String, fetch: bool) -> 
         .await
         .map_err(e)?
         .map_err(e)
+}
+
+#[tauri::command]
+async fn timeline_fetch(app: tauri::AppHandle, repo_key: String, rev: String, depth: usize, trees: bool, since: Option<String>) -> Res<(String, String)> {
+    let dir = data_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        mirror::timeline_fetch(&dir, &repo_key, &rev, depth, trees, since.as_deref())
+            .map(|(path, reference)| (path.to_string_lossy().into_owned(), reference))
+    }).await.map_err(e)?.map_err(e)
+}
+
+#[tauri::command]
+async fn timeline_refs(app: tauri::AppHandle, repo_key: String) -> Res<mirror::TimelineRefs> {
+    let dir = data_dir(&app)?;
+    tauri::async_runtime::spawn_blocking(move || mirror::timeline_refs(&repo_key, &dir))
+        .await.map_err(e)?.map_err(e)
 }
 
 /// Exact-revision checkout for LSP: from the mirror (or a given local repo), detached, in the app cache.
@@ -282,6 +305,11 @@ fn open_external(url: String) -> Res<()> {
     oauth::open_external(&url)
 }
 
+#[tauri::command]
+fn open_devtools(window: tauri::WebviewWindow) {
+    window.open_devtools();
+}
+
 /// GUI apps launched from Finder/Dock get a minimal PATH; add the usual user tool
 /// locations so git, ssh, language servers and local AI CLIs resolve like in a shell.
 pub fn augment_path() {
@@ -333,12 +361,12 @@ pub fn run() {
             db_load_all, db_put, db_delete, blob_put, blob_get, blob_delete, outbox_add, outbox_all, outbox_remove, db_wipe,
             keychain_get, keychain_set,
             git_log, git_refs, git_gitlinks, git_diff, git_show_file, git_checkout_detached,
-            ssh_run, codegraph,
+            ssh_run, codegraph, codegraph_lineage,
             github_device_start, github_device_poll,
-            oauth_loopback_start, oauth_loopback_poll, open_external,
+            oauth_loopback_start, oauth_loopback_poll, open_external, open_devtools,
             lsp_query, lsp_shutdown, git_head,
             selftest_mode, selftest_report,
-            mirror_ensure, worktree_at, ai_local_run
+            mirror_ensure, timeline_fetch, timeline_refs, worktree_at, ai_local_run
         ])
         .run(tauri::generate_context!())
         .expect("error while running Nonlinear");

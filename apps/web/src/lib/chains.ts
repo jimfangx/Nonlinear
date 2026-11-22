@@ -39,7 +39,7 @@ export function blockedSet(graph: DependencyGraph, prs: Record<string, { state: 
 export async function hydrateChain(members: PRKey[]): Promise<void> {
   const prs = useApp.getState().prs;
   const missing = members.filter((m) => !prs[m] && parsePRKey(m));
-  await Promise.all(missing.slice(0, 20).map((m) => ensurePR(m, Infinity)));
+  await Promise.all(missing.slice(0, 8).map((m) => ensurePR(m)));
 }
 
 export function edgeId(from: PRKey, to: PRKey): string {

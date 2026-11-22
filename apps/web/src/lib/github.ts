@@ -59,6 +59,7 @@ export async function githubApi(): Promise<GitHubClient> {
 
 export function resetClient(): void {
   client = null;
+  retryMissingAfter.clear();
 }
 
 /** Simple concurrency limiter so a big view doesn't burst the API. */
@@ -170,9 +171,11 @@ export async function refreshRepos(repos: string[], onProgress?: (p: RefreshProg
     return s;
   });
   storeSnapshots(snaps);
-  // Enrich: authenticated → all (bounded concurrency); anonymous → 10 most recent unenriched.
+  // Enrich the most recently updated PRs within a fixed request budget.
   const needs = snaps.filter((s) => s.reviewDecision === "unknown" || s.ci === "unknown");
-  const budget = c.authenticated ? needs : needs.slice(0, 10);
+  const remaining = useApp.getState().rateLimit?.remaining;
+  const limit = Math.min(c.authenticated ? 25 : 10, remaining === undefined ? Infinity : Math.max(0, Math.floor((remaining - 8) / 5)));
+  const budget = needs.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, limit);
   prog.total += budget.length;
   await pool(budget, 6, async (s) => {
     await enrichPR(s.key).catch((e) => prog.errors.push(`${s.key}: ${describeError(e)}`));
@@ -182,7 +185,18 @@ export async function refreshRepos(repos: string[], onProgress?: (p: RefreshProg
   return prog;
 }
 
-export async function enrichPR(key: string): Promise<PRSnapshot> {
+const enrichments = new Map<string, Promise<PRSnapshot>>();
+
+export function enrichPR(key: string): Promise<PRSnapshot> {
+  let request = enrichments.get(key);
+  if (!request) {
+    request = loadEnrichedPR(key).finally(() => enrichments.delete(key));
+    enrichments.set(key, request);
+  }
+  return request;
+}
+
+async function loadEnrichedPR(key: string): Promise<PRSnapshot> {
   const r = parsePRKey(key);
   if (!r) throw new Error(`bad PR key ${key}`);
   const c = await githubApi();
@@ -194,16 +208,34 @@ export async function enrichPR(key: string): Promise<PRSnapshot> {
   return snap;
 }
 
-/** Fetch a single PR (e.g. an external dependency not in any view). */
-export async function ensurePR(key: string, maxAgeMs = 5 * 60_000): Promise<PRSnapshot | null> {
-  const cached = useApp.getState().prs[key];
-  if (cached && Date.now() - cached.fetchedAt < maxAgeMs) return cached;
-  if (!useApp.getState().online) return cached ?? null;
-  try {
-    return await enrichPR(key);
-  } catch {
-    return cached ?? null;
+const missingPRs = new Map<string, Promise<PRSnapshot | null>>();
+const retryMissingAfter = new Map<string, number>();
+
+/** Load an uncached PR's metadata for the Inbox or a chain in one request. */
+export function ensurePR(key: string): Promise<PRSnapshot | null> {
+  const { prs, online } = useApp.getState();
+  if (prs[key] || !online || Date.now() < (retryMissingAfter.get(key) ?? 0)) {
+    return Promise.resolve(prs[key] ?? null);
   }
+  let request = missingPRs.get(key);
+  if (!request) {
+    request = (async () => {
+      const r = parsePRKey(key);
+      if (!r) return null;
+      const pull = await (await githubApi()).getPull(r.owner, r.repo, r.number);
+      if (pull.base.repo.private && useApp.getState().settings_().publicOnly) return null;
+      const existing = useApp.getState().prs[key];
+      if (existing) return existing;
+      const snap = toSnapshot(pull);
+      storeSnapshots([snap]);
+      return snap;
+    })().catch(() => {
+      retryMissingAfter.set(key, Date.now() + 60_000);
+      return null;
+    }).finally(() => missingPRs.delete(key));
+    missingPRs.set(key, request);
+  }
+  return request;
 }
 
 /* ------------------------------------------------------------------ */

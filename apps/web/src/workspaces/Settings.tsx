@@ -15,19 +15,21 @@ export function SettingsPage() {
     if (location.hash.includes("#intentions")) document.getElementById("intentions")?.scrollIntoView();
   }, []);
   return (
-    <div className="page" style={{ maxWidth: 980 }}>
-      <h1 className="h1">Settings</h1>
-      <CloudSection />
-      <ConflictsSection />
-      <GitHubSection />
-      <IntentionsSection />
-      <PolicySection />
-      <AISection />
-      <KeysSection />
-      <ColumnsSection />
-      <LanguageServersSection />
-      <SSHSection />
-      <DataSection />
+    <div className="page settings-page">
+      <div className="settings-content">
+        <h1 className="h1">Settings</h1>
+        <CloudSection />
+        <ConflictsSection />
+        <GitHubSection />
+        <IntentionsSection />
+        <PolicySection />
+        <AISection />
+        <KeysSection />
+        <ColumnsSection />
+        <LanguageServersSection />
+        <SSHSection />
+        <DataSection />
+      </div>
     </div>
   );
 }

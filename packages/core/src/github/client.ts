@@ -484,6 +484,7 @@ export interface RawReviewComment {
   path: string;
   line: number | null;
   original_line: number | null;
+  start_line?: number | null;
   side: "LEFT" | "RIGHT";
   commit_id: string;
   created_at: string;

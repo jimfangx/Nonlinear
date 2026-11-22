@@ -96,13 +96,16 @@ await step("D review", async () => {
   // private note
   await nos.nth(5).click();
   await page.getByRole("button", { name: "✎ Private note" }).click();
-  await page.locator(".modal textarea").fill("Check poisoned-wakeup interaction with load speculation");
+  await page.getByRole("textbox", { name: "Private note" }).fill("Check poisoned-wakeup interaction with load speculation");
   await page.getByRole("button", { name: "Save note" }).click();
   // draft GitHub comment
   await nos.nth(6).click();
   await page.keyboard.press("c");
-  await page.locator(".modal textarea").fill("Could this filter drop a valid wakeup?");
+  await page.getByRole("textbox", { name: "Draft GitHub comment" }).fill("Could this filter drop a valid wakeup?");
   await page.getByRole("button", { name: "Save draft" }).click();
+  check("D: selected review ranges render notes and drafts inline", await page.locator(".diff-annotation details").count() === 2);
+  await page.keyboard.press("Escape");
+  check("D: Escape clears the selected range", await page.locator(".dl.sel").count() === 0);
   await shot("D-review");
   // Offline reopen: progress survives
   await ctx.setOffline(true);
@@ -187,7 +190,7 @@ await step("C timeline", async () => {
   await page.getByRole("button", { name: "+ New release" }).click();
   await page.getByRole("button", { name: "Create" }).click();
   await page.goto(`${APP}/#/timeline`);
-  await page.getByRole("button", { name: "+ New timeline" }).click();
+  await page.getByRole("button", { name: "New timeline" }).click();
   await page.getByRole("button", { name: "Create" }).click();
   await page.locator(".tl-row", { hasText: "generators/boom" }).waitFor({ timeout: 15000 });
   await page.locator(".tl-row", { hasText: "generators/boom" }).getByText("PR #124").waitFor({ timeout: 15000 });

@@ -29,14 +29,15 @@ import {
   toCommitNode,
   type GitlinkProposal,
   type RawCommit,
+  type RawReviewComment,
 } from "@nonlinear/core";
 import { useApp, useSettings, type DraftComment } from "../lib/store";
 import { fileSectionOf, fileState, saveFileState, gitlinkShas, type LoadedDiff } from "../lib/review";
 import { githubApi, describeError } from "../lib/github";
 import { aiAllowedFor, latestSummary, summarize } from "../lib/ai";
 import { renderMarkdown } from "../lib/markdown";
-import { isDesktop, desktop } from "../lib/platform";
-import { exactRoot, lspAvailable, lspLocations, workingTreeFor, type LspLocation } from "../lib/lsp";
+import { isDesktop, desktop, invoke } from "../lib/platform";
+import { exactRoot, headMatches, lspAvailable, lspLocations, workingTreeFor, type LspLocation } from "../lib/lsp";
 import { useActions } from "../lib/keys";
 import { expandToEnclosing } from "../lib/treesitter";
 import { FileDiff, hunkStarts, type DiffMode } from "../components/FileDiff";
@@ -45,7 +46,15 @@ import { FileInspector } from "./FileInspector";
 
 const STATUS_ICON: Record<string, string> = { complete: "✓", incomplete: "◐", "not-started": "○", postponed: "⏸", "needs-rereview": "⟳" };
 
-export function ReviewFiles({ pr, diff }: { pr: PRSnapshot; diff: LoadedDiff }) {
+export function ReviewFiles({ pr, diff, refreshComments }: { pr: PRSnapshot; diff: LoadedDiff; refreshComments: number }) {
+  const [comments, setComments] = useState<RawReviewComment[]>([]);
+  useEffect(() => {
+    let active = true;
+    void githubApi().then((api) => api.listReviewComments(pr.owner, pr.repo, pr.number)).then((items) => {
+      if (active) setComments(items);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [pr.key, pr.headSha, refreshComments]);
   const reviews = useApp((s) => s.reviews[pr.key]);
   const [sel, setSel] = useState(0);
   const [filter, setFilter] = useState("");
@@ -66,7 +75,14 @@ export function ReviewFiles({ pr, diff }: { pr: PRSnapshot; diff: LoadedDiff }) 
     <Split id="review-files" initial={0.22}>
       <div className="col" style={{ height: "100%", gap: 0 }}>
         <div className="toolbar">
-          <input className="input grow" placeholder="Filter files" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <input className="input grow" placeholder="Filter files" aria-label="Filter files" value={filter}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== "Escape") return;
+              e.preventDefault();
+              e.stopPropagation();
+              if (e.key === "Enter" && visible.length && !visible.some(({ i }) => i === sel)) setSel(visible[0]!.i);
+              e.currentTarget.blur();
+            }} onChange={(e) => setFilter(e.target.value)} />
         </div>
         <div style={{ overflow: "auto", flex: 1, padding: 4 }} role="tree">
           {visible.map(({ f: file, i }) => {
@@ -89,12 +105,12 @@ export function ReviewFiles({ pr, diff }: { pr: PRSnapshot; diff: LoadedDiff }) 
           })}
         </div>
       </div>
-      {f ? <FilePane key={`${f.path}:${pr.headSha}`} pr={pr} diff={diff} file={f} mode={mode} setMode={(m) => { setMode(m); localStorage.setItem("nl:diffmode", m); }} /> : <div className="empty">No files</div>}
+      {f ? <FilePane key={`${f.path}:${pr.headSha}`} pr={pr} diff={diff} file={f} comments={comments} mode={mode} setMode={(m) => { setMode(m); localStorage.setItem("nl:diffmode", m); }} /> : <div className="empty">No files</div>}
     </Split>
   );
 }
 
-function FilePane({ pr, diff, file, mode, setMode }: { pr: PRSnapshot; diff: LoadedDiff; file: DiffFileEntry; mode: DiffMode; setMode: (m: DiffMode) => void }) {
+function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot; diff: LoadedDiff; file: DiffFileEntry; comments: RawReviewComment[]; mode: DiffMode; setMode: (m: DiffMode) => void }) {
   const section = useMemo(() => fileSectionOf(diff, file), [diff, file]);
   const hunks = useMemo(() => parseFileHunks(section), [section]);
   const progressRec = useApp((s) => s.reviews[pr.key]);
@@ -106,6 +122,39 @@ function FilePane({ pr, diff, file, mode, setMode }: { pr: PRSnapshot; diff: Loa
   const [selection, setSelection] = useState<Interval | null>(null);
   const [anchorLine, setAnchorLine] = useState<DiffLine | null>(null);
   const [composer, setComposer] = useState<null | "note" | "comment">(null);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [showNotes, setShowNotes] = useState(() => localStorage.getItem("nl:inline-notes") !== "false");
+  const [showComments, setShowComments] = useState(() => localStorage.getItem("nl:inline-comments") !== "false");
+  const [showRail, setShowRail] = useState(() => localStorage.getItem("nl:review-notes-pane") === "true");
+  const [closedAnnotations, setClosedAnnotations] = useState<Set<string>>(() => new Set());
+  const annotation = (id: string, label: string, body: string, url?: string) =>
+    <details key={id} className="panel inline-annotation" open={!closedAnnotations.has(id)} onToggle={(e) => {
+      const open = e.currentTarget.open;
+      setClosedAnnotations((previous) => {
+        if (open === !previous.has(id)) return previous;
+        const next = new Set(previous);
+        if (open) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    }}><summary>{label}</summary><div>{body}</div>{url && <a href={url} target="_blank" rel="noreferrer">View on GitHub ↗</a>}</details>;
+  useEffect(() => {
+    const escape = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !document.querySelector(".overlay:not([inert]), #workspace-content[inert]")) {
+        setComposer(null);
+        setSelection(null);
+        setMenu(null);
+      }
+    };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, []);
+  useEffect(() => {
+    if (!menu) return;
+    const dismiss = (e: PointerEvent) => { if (!(e.target instanceof Element && e.target.closest(".review-context-menu"))) setMenu(null); };
+    window.addEventListener("pointerdown", dismiss);
+    return () => window.removeEventListener("pointerdown", dismiss);
+  }, [menu]);
   const [scrollTo, setScrollTo] = useState<number | null>(null);
   const [expansions, setExpansions] = useState(new Map<number, { lines: string[]; startNo: number; label?: string }>());
   const [inspector, setInspector] = useState(false);
@@ -114,6 +163,7 @@ function FilePane({ pr, diff, file, mode, setMode }: { pr: PRSnapshot; diff: Loa
   const starts = useMemo(() => hunkStarts(hunks), [hunks]);
   const st = fileStatus(state);
   const save = (s: FileReviewState) => saveFileState(pr, s);
+  const reviewed = st === "complete";
   const curHunk = () => {
     const pos = selection?.[0] ?? scrollTo ?? 0;
     let h = 0;
@@ -166,18 +216,75 @@ function FilePane({ pr, diff, file, mode, setMode }: { pr: PRSnapshot; diff: Loa
     setExpansions(next);
   };
 
-  const markers = useMemo(() => {
-    const m = new Map<number, React.ReactNode>();
-    for (const n of notes) if (n.anchor) m.set(n.anchor.rows[0], <span className="chip accent" style={{ marginLeft: 8 }} title={n.body}>✎ note</span>);
-    for (const d of drafts) {
-      const rows = hunks.flatMap((h) => h.lines);
-      const ri = rows.findIndex((l) => (d.side === "RIGHT" ? l.newNo === d.line && l.kind !== "del" : l.oldNo === d.line && l.kind !== "add"));
-      if (ri >= 0) m.set(ri, <span className="chip info" style={{ marginLeft: 8 }} title={d.body}>💬 draft</span>);
-    }
-    return m;
-  }, [notes, drafts, hunks]);
-
   const allRows = useMemo(() => hunks.flatMap((h) => h.lines), [hunks]);
+
+  const saveAnnotation = (body: string) => {
+    if (!selection || !composer) return;
+    if (composer === "note") {
+      const rows = allRows.map((line) => line.text);
+      const n: PrivateNote = {
+        id: newId("note"),
+        prKey: pr.key,
+        headSha: pr.headSha,
+        anchor: { path: file.path, rows: selection, anchorText: rows.slice(selection[0], selection[1]), before: rows.slice(Math.max(0, selection[0] - 2), selection[0]), after: rows.slice(selection[1], selection[1] + 2) },
+        body, orphaned: false, createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      put("notes", n.id, n);
+    } else {
+      const last = allRows[selection[1] - 1] ?? anchorLine;
+      const first = allRows[selection[0]];
+      const side = last?.kind === "del" ? "LEFT" : "RIGHT";
+      const line = side === "LEFT" ? last?.oldNo : last?.newNo;
+      const startLine = side === "LEFT" ? first?.oldNo : first?.newNo;
+      if (line == null || (selection[1] - selection[0] > 1 && (startLine == null || startLine >= line))) {
+        toast("warn", "Select a continuous range on one side of the diff for a GitHub comment.");
+        return;
+      }
+      const draft: DraftComment = { id: newId("draft"), prKey: pr.key, headSha: pr.headSha, path: file.path, line, side, startLine: first !== last ? startLine ?? undefined : undefined, body, createdAt: Date.now() };
+      put("drafts", draft.id, draft);
+      toast("info", "Draft saved. It will be posted when you submit your review.");
+    }
+    setComposer(null);
+  };
+
+  const annotations = new Map<number, React.ReactNode[]>();
+  const annotate = (i: number, content: React.ReactNode) => {
+    if (i < 0) return;
+    const row = annotations.get(i) ?? [];
+    row.push(content);
+    annotations.set(i, row);
+  };
+  const lineIndex = (line: number, side: "LEFT" | "RIGHT") => allRows.findIndex((entry) => side === "LEFT" ? entry.oldNo === line : entry.newNo === line);
+  if (showNotes) {
+    for (const n of notes) if (n.anchor && !n.orphaned) {
+      const [start, end] = n.anchor.rows;
+      annotate(end - 1, annotation(n.id, `Private note · diff rows ${start + 1}–${end}`, n.body));
+    }
+  }
+  if (showComments) {
+    for (const d of drafts) if (d.headSha === pr.headSha) {
+      annotate(lineIndex(d.line, d.side), annotation(d.id, `Draft GitHub comment · ${d.startLine ? d.startLine + "–" : ""}${d.line}`, d.body));
+    }
+    for (const c of comments) if (c.path === file.path && c.line != null) {
+      annotate(lineIndex(c.line, c.side), annotation(`github:${c.id}`, `${c.user?.login ?? "GitHub"} · line ${c.start_line ? c.start_line + "–" : ""}${c.line}`, c.body, c.html_url));
+    }
+  }
+  if (composer && selection) {
+    annotate(selection[1] - 1, <Composer key={`${composer}:${selection.join("-")}`} kind={composer} onClose={() => setComposer(null)} onSave={saveAnnotation} />);
+  }
+
+  const openComposer = (kind: "note" | "comment") => {
+    setComposer(kind);
+    if (selection) setScrollTo(selection[1] - 1);
+  };
+
+  const actions = selection ? [
+    { label: "Mark reviewed", run: () => save(markReviewed(state, selection)) },
+    { label: "Needs revisit", run: () => save(flagRange(state, selection)) },
+    { label: "Clear flag", run: () => save(unflagRange(state, selection)) },
+    { label: "Private note", run: () => openComposer("note") },
+    { label: "GitHub comment", run: () => openComposer("comment") },
+  ] : [];
 
   return (
     <div className="col" style={{ height: "100%", gap: 0 }}>
@@ -201,15 +308,15 @@ function FilePane({ pr, diff, file, mode, setMode }: { pr: PRSnapshot; diff: Loa
           <option value="unified">Unified</option>
           <option value="split">Side-by-side</option>
         </select>
-        <button className="btn sm" onClick={() => save(markAllReviewed(state))} title="Mark whole file reviewed">
-          ✓ Reviewed
+        <button className={`btn sm ${reviewed ? "primary" : ""}`} aria-pressed={reviewed} onClick={() => save(reviewed ? resetFile(state) : markAllReviewed(state))} title={reviewed ? "Reset file review" : "Mark the whole file reviewed"}>
+          {reviewed ? "✓ Reviewed" : "Mark file reviewed"}
         </button>
         <button className="btn sm" onClick={() => save({ ...state, postponed: !state.postponed, updatedAt: Date.now() })}>
           {state.postponed ? "▶ Unpostpone" : "⏸ Come back later"}
         </button>
-        <button className="btn sm" onClick={() => save(resetFile(state))}>
-          Reset
-        </button>
+        <label className="small row"><input type="checkbox" checked={showNotes} onChange={(e) => { setShowNotes(e.target.checked); localStorage.setItem("nl:inline-notes", String(e.target.checked)); }} /> Inline notes</label>
+        <label className="small row"><input type="checkbox" checked={showComments} onChange={(e) => { setShowComments(e.target.checked); localStorage.setItem("nl:inline-comments", String(e.target.checked)); }} /> Inline comments</label>
+        <button className="btn sm" aria-pressed={showRail} onClick={() => { setShowRail(!showRail); localStorage.setItem("nl:review-notes-pane", String(!showRail)); }}>Notes pane</button>
         <button className="btn sm" onClick={() => setInspector(true)}>
           ⛶ Inspect
         </button>
@@ -237,10 +344,10 @@ function FilePane({ pr, diff, file, mode, setMode }: { pr: PRSnapshot; diff: Loa
           <button className="btn sm" onClick={() => save(unflagRange(state, selection))}>
             Clear flag
           </button>
-          <button className="btn sm" onClick={() => setComposer("note")}>
+          <button className="btn sm" onClick={() => openComposer("note")}>
             ✎ Private note
           </button>
-          <button className="btn sm" onClick={() => setComposer("comment")}>
+          <button className="btn sm" onClick={() => openComposer("comment")}>
             c GitHub comment
           </button>
           <button className="btn ghost sm" onClick={() => setSelection(null)}>
@@ -248,8 +355,9 @@ function FilePane({ pr, diff, file, mode, setMode }: { pr: PRSnapshot; diff: Loa
           </button>
         </div>
       )}
-      <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-        <div className="grow" style={{ minWidth: 0, padding: 4 }}>
+      <div style={{ flex: 1, minHeight: 0 }}>
+        <Split id="review-notes" initial={0.74} min={0.18} showSecond={showRail}>
+        <div className="grow" style={{ height: "100%", minWidth: 0, padding: 4 }}>
           {sub ? (
             <SubmoduleExpansion pr={pr} file={file} section={section} mode={mode} />
           ) : (
@@ -258,55 +366,34 @@ function FilePane({ pr, diff, file, mode, setMode }: { pr: PRSnapshot; diff: Loa
               mode={mode}
               expansions={expansions}
               onExpand={(hi, h) => void onExpand(hi, h)}
-              review={{ state, setFrontier: (row) => save(setFrontier(state, row)) }}
+              review={{ state, setFrontier: (row) => save(setFrontier(fileState(useApp.getState().reviews[pr.key], file, section), row)) }}
               selection={selection}
               onSelect={(iv, a) => {
                 setSelection(iv);
+                setComposer(null);
+                setMenu(null);
                 setAnchorLine(a?.line ?? null);
               }}
-              markers={markers}
+              annotations={annotations}
+              onLineContext={(e, i, line) => {
+                e.preventDefault();
+                if (!selection || i < selection[0] || i >= selection[1]) {
+                  setSelection([i, i + 1]);
+                  setComposer(null);
+                }
+                setAnchorLine(line);
+                setMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - 195)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - 176)) });
+              }}
               scrollToRow={scrollTo}
             />
           )}
         </div>
         <NotesRail pr={pr} file={file} notes={notes} drafts={drafts} />
+        </Split>
       </div>
-      {composer && selection && (
-        <Composer
-          kind={composer}
-          onClose={() => setComposer(null)}
-          onSave={(body) => {
-            if (composer === "note") {
-              const rows = allRows.map((l) => l.text);
-              const n: PrivateNote = {
-                id: newId("note"),
-                prKey: pr.key,
-                headSha: pr.headSha,
-                anchor: { path: file.path, rows: selection, anchorText: rows.slice(selection[0], selection[1]), before: rows.slice(Math.max(0, selection[0] - 2), selection[0]), after: rows.slice(selection[1], selection[1] + 2) },
-                body,
-                orphaned: false,
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-              };
-              put("notes", n.id, n);
-            } else {
-              const last = allRows[selection[1] - 1] ?? anchorLine;
-              const first = allRows[selection[0]];
-              if (!last || last.kind === "meta") {
-                toast("warn", "GitHub cannot anchor a comment here. Use a PR-level comment instead.");
-                return;
-              }
-              const side = last.kind === "del" ? "LEFT" : "RIGHT";
-              const line = side === "LEFT" ? last.oldNo! : last.newNo!;
-              const startLine = first && first !== last ? (side === "LEFT" ? first.oldNo : first.newNo) ?? undefined : undefined;
-              const d: DraftComment = { id: newId("draft"), prKey: pr.key, headSha: pr.headSha, path: file.path, line, side, startLine, body, createdAt: Date.now() };
-              put("drafts", d.id, d);
-              toast("info", "Draft saved locally. It's posted when you submit your review.");
-            }
-            setComposer(null);
-          }}
-        />
-      )}
+      {menu && <div className="panel review-context-menu" style={{ left: menu.x, top: menu.y }} role="group" aria-label="Diff line actions">
+        {actions.map((action) => <button key={action.label} className="btn ghost" onClick={() => { action.run(); setMenu(null); }}>{action.label}</button>)}
+      </div>}
       {inspector && <FileInspector pr={pr} diff={diff} file={file} onClose={() => setInspector(false)} />}
       {impact && <ImpactGraph pr={pr} diff={diff} file={file} section={section} onClose={() => setImpact(false)} />}
     </div>
@@ -355,9 +442,10 @@ function FileSummary({ pr, file, section }: { pr: PRSnapshot; file: DiffFileEntr
 function NotesRail({ pr, file, notes, drafts }: { pr: PRSnapshot; file: DiffFileEntry; notes: PrivateNote[]; drafts: DraftComment[] }) {
   const remove = useApp((s) => s.remove);
   const orphaned = useApp(useShallow((s) => Object.values(s.notes).filter((n) => n.prKey === pr.key && n.orphaned)));
-  if (!notes.length && !drafts.length && !orphaned.length) return null;
+
   return (
-    <aside style={{ width: 260, flex: "none", borderLeft: "1px solid var(--border)", overflow: "auto", padding: 8 }} aria-label="Notes and drafts">
+    <aside className="review-notes-rail" aria-label="Notes and drafts">
+      {!notes.length && !drafts.length && !orphaned.length && <div className="empty small">No notes or drafts for this file.</div>}
       {notes.length > 0 && <h3 className="h3">Private notes</h3>}
       {notes.map((n) => (
         <div key={n.id} className="panel pad small" style={{ marginBottom: 6 }}>
@@ -394,26 +482,16 @@ function NotesRail({ pr, file, notes, drafts }: { pr: PRSnapshot; file: DiffFile
   );
 }
 
-function Composer({ kind, onClose, onSave }: { kind: "note" | "comment"; onClose: () => void; onSave: (b: string) => void }) {
-  const [v, setV] = useState("");
-  return (
-    <Modal
-      title={kind === "note" ? "Private note (never posted to GitHub)" : "Draft GitHub comment"}
-      onClose={onClose}
-      footer={
-        <>
-          <button className="btn" onClick={onClose}>
-            Cancel
-          </button>
-          <button className="btn primary" disabled={!v.trim()} onClick={() => onSave(v)}>
-            {kind === "note" ? "Save note" : "Save draft"}
-          </button>
-        </>
-      }
-    >
-      <textarea aria-label={kind === "note" ? "Private note" : "Draft GitHub comment"} autoFocus className="input" style={{ width: "100%" }} value={v} onChange={(e) => setV(e.target.value)} placeholder={kind === "comment" ? "Tip: ```suggestion blocks become GitHub suggestions" : ""} />
-    </Modal>
-  );
+function Composer({ kind, onClose, onSave }: { kind: "note" | "comment"; onClose: () => void; onSave: (body: string) => void }) {
+  const [body, setBody] = useState("");
+  const label = kind === "note" ? "Private note" : "Draft GitHub comment";
+  return <form className="panel inline-annotation col" onSubmit={(e) => { e.preventDefault(); if (body.trim()) onSave(body); }}>
+    <textarea aria-label={label} placeholder={label} autoFocus className="input" value={body} onChange={(e) => setBody(e.target.value)} />
+    <div className="row">
+      <button className="btn primary sm" disabled={!body.trim()}>{kind === "note" ? "Save note" : "Save draft"}</button>
+      <button type="button" className="btn sm" onClick={onClose}>Cancel</button>
+    </div>
+  </form>;
 }
 
 /* ---------------- Submodule expansion (§5.1) ---------------- */
@@ -491,10 +569,10 @@ function ImpactGraph({ pr, diff, file, section, onClose }: { pr: PRSnapshot; dif
   }, [section]);
   const refs = useMemo(() => {
     const m = new Map<string, { path: string; count: number }[]>();
-    for (const s of symbols) {
+    for (const s of symbols.slice(0, 30)) {
       const re = new RegExp(`\\b${s}\\b`);
       const hits: { path: string; count: number }[] = [];
-      for (const f of diff.index.files) {
+      for (const f of diff.index.files.slice(0, 120)) {
         if (f.path === file.path) continue;
         const txt = diff.text.slice(f.start, f.end);
         const count = txt.split("\n").filter((l) => re.test(l)).length;
@@ -504,10 +582,47 @@ function ImpactGraph({ pr, diff, file, section, onClose }: { pr: PRSnapshot; dif
     }
     return m;
   }, [symbols, diff, file.path]);
-  const [cg, setCg] = useState<string | null>(null);
+  const [indexed, setIndexed] = useState<ImpactEdge[] | null>(null);
+  const [graphMessage, setGraphMessage] = useState<string | null>(null);
   const repoKey = `${pr.owner}/${pr.repo}`.toLowerCase();
   const lspAvail = lspAvailable(repoKey, file.path);
   const [confirmed, setConfirmed] = useState<Record<string, { server: string; locations: LspLocation[]; error?: string }>>({});
+  useEffect(() => {
+    const path = workingTreeFor(repoKey);
+    if (!isDesktop() || !path || !symbols.length) return;
+    let cancelled = false;
+    void (async () => {
+      if (!await headMatches(repoKey, pr.headSha)) {
+        if (!cancelled) setGraphMessage("The local checkout is on a different revision from this PR.");
+        return;
+      }
+      const edges: ImpactEdge[] = [];
+      let indexedQueries = 0;
+      for (const symbol of symbols.slice(0, 5)) {
+        if (cancelled) return;
+        for (const direction of ["callees", "impact"] as const) {
+          const result = await invoke<CodeGraphResult>("codegraph_lineage", { repoPath: path, direction, symbol, file: file.path }).catch(() => null);
+          if (!result || result.filteredOut || result.changedOnDisk?.length) continue;
+          const definitions = result.definitions?.filter((entry) => entry.definition.filePath === file.path);
+          if (!definitions?.length) continue;
+          indexedQueries++;
+          for (const entry of definitions) {
+            const nodes = new Map((entry.affected ?? entry.callees ?? []).map((node) => [node.id, node.filePath]));
+            for (const root of entry.roots ?? [entry.definition.id]) nodes.set(root, file.path);
+            for (const relation of entry.edges ?? []) {
+              const from = nodes.get(relation.source);
+              const to = nodes.get(relation.target);
+              if (from && to && from !== to) edges.push({ from: to, to: from });
+            }
+          }
+        }
+      }
+      if (cancelled) return;
+      if (indexedQueries) setIndexed(edges);
+      else setGraphMessage("No CodeGraph index results for the changed symbols on this revision.");
+    })().catch((error) => { if (!cancelled) setGraphMessage(String(error)); });
+    return () => { cancelled = true; };
+  }, [repoKey, pr.headSha, file.path, symbols]);
   const confirmRefs = async (sym: string) => {
     try {
       // Exact PR head revision (worktree from the mirror cache or mapped working tree).
@@ -524,12 +639,42 @@ function ImpactGraph({ pr, diff, file, section, onClose }: { pr: PRSnapshot; dif
       setConfirmed((c) => ({ ...c, [sym]: { server: lspAvail.ok ? lspAvail.server.name : "", locations: [], error: (e as Error).message } }));
     }
   };
+  const inferred = useMemo<ImpactEdge[]>(() => {
+    const changes = diff.index.files.slice(0, 120).map((changed) => {
+      const text = fileSectionOf(diff, changed).slice(0, 100_000);
+      return { path: changed.path, text, symbols: new Set([...text.matchAll(/\b(?:def|class|object|trait|fn|function|struct|enum|interface|module)\s+([A-Za-z_][A-Za-z0-9_]*)/g)].map((match) => match[1]!)) };
+    });
+    const edges: ImpactEdge[] = [];
+    for (const definition of changes) {
+      for (const symbol of definition.symbols) {
+        const word = new RegExp(`\\b${symbol}\\b`);
+        for (const consumer of changes) {
+          if (consumer.path !== definition.path && !consumer.symbols.has(symbol) && word.test(consumer.text)) {
+            edges.push({ from: definition.path, to: consumer.path });
+          }
+        }
+      }
+    }
+    for (const [symbol, uses] of refs) {
+      if (symbols.includes(symbol)) for (const use of uses) edges.push({ from: file.path, to: use.path });
+    }
+    return edges;
+  }, [diff, file.path, refs, symbols]);
+
+  const confirmedEdges = Object.values(confirmed).flatMap((entry) => entry.locations
+    .filter((location) => location.path !== file.path && !location.path.startsWith("file:"))
+    .map((location) => ({ from: file.path, to: location.path })));
+
   return (
     <Modal title={`Impact — ${file.path}`} onClose={onClose} wide>
       <div className="col small">
         <div className="banner info">
-          Engine: <b>{lspAvail.ok ? `${lspAvail.server.name} (LSP) on demand; heuristic below` : isDesktop() ? "heuristic (configure a language server + working tree for confirmed results)" : "heuristic (web)"}</b>. Unless marked confirmed, relationships are <b>inferred</b> from symbol names in this PR's changed files, not confirmed by a semantic index. For the full repo graph, use the desktop app or a paired SSH agent.
+          {indexed ? "CodeGraph index for the PR revision" : "Relationships inferred from symbols in the changed files"}
+          {confirmedEdges.length > 0 && " · includes language-server references"}
         </div>
+        <ImpactDiagram file={file.path} edges={[...(indexed ?? inferred), ...confirmedEdges]} />
+        {graphMessage && <p className="faint small">{graphMessage}</p>}
+        <details><summary>Symbol evidence</summary>
         {symbols.length === 0 && <div className="faint">No changed declarations detected.</div>}
         {symbols.map((s) => (
           <div key={s} className="panel pad">
@@ -539,11 +684,6 @@ function ImpactGraph({ pr, diff, file, section, onClose }: { pr: PRSnapshot; dif
               {lspAvail.ok && (
                 <button className="btn sm" onClick={() => void confirmRefs(s)}>
                   Confirm with {lspAvail.server.name}
-                </button>
-              )}
-              {isDesktop() && workingTreeFor(repoKey) && (
-                <button className="btn sm" onClick={() => void desktop.codegraph(workingTreeFor(repoKey)!, "impact", s).then(setCg).catch((e) => setCg(String(e)))}>
-                  CodeGraph impact
                 </button>
               )}
             </div>
@@ -564,7 +704,7 @@ function ImpactGraph({ pr, diff, file, section, onClose }: { pr: PRSnapshot; dif
             {!(refs.get(s) ?? []).length && <div className="faint">No references in other changed files.</div>}
           </div>
         ))}
-        {cg && <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>{cg}</pre>}
+        </details>
         <div className="faint">Index key: {pr.key}@{pr.headSha.slice(0, 8)} · heuristic-v1</div>
       </div>
     </Modal>
@@ -640,4 +780,78 @@ function GitlinkReconcile({ pr, path, provisional, oldSha, upstream }: { pr: PRS
       <div className="faint">Nothing is pushed automatically. Merge of the upstream PR alone does not prove the downstream gitlink is correct.</div>
     </div>
   );
+}
+
+
+type ImpactEdge = { from: string; to: string };
+
+type CodeGraphNode = { id: string; filePath: string };
+type CodeGraphResult = {
+  filteredOut?: boolean;
+  changedOnDisk?: string[];
+  definitions?: {
+    definition: CodeGraphNode;
+    roots?: string[];
+    affected?: CodeGraphNode[];
+    callees?: CodeGraphNode[];
+    edges?: { source: string; target: string }[];
+  }[];
+};
+
+function ImpactDiagram({ file, edges }: { file: string; edges: ImpactEdge[] }) {
+  const [hover, setHover] = useState<string | null>(null);
+  const unique = [...new Map(edges.map((edge) => [JSON.stringify([edge.from, edge.to]), edge])).values()];
+  const lineage = (from: "from" | "to", to: "from" | "to") => {
+    const seen = new Set([file]);
+    const paths = [file];
+    for (let i = 0; i < paths.length && seen.size < 13; i++) {
+      for (const edge of unique) {
+        if (edge[from] !== paths[i] || seen.has(edge[to])) continue;
+        seen.add(edge[to]);
+        paths.push(edge[to]);
+        if (seen.size >= 13) break;
+      }
+    }
+    return paths.slice(1);
+  };
+  const ancestors = lineage("to", "from");
+  const descendants = lineage("from", "to").filter((path) => !ancestors.includes(path));
+  const related = new Set([...ancestors, file, ...descendants]);
+  const context = [...new Set(unique.flatMap(({ from, to }) => [from, to]))].filter((path) => !related.has(path)).slice(0, 4);
+  const columns = [
+    { title: "Dependencies", paths: ancestors },
+    { title: "Current file", paths: [file, ...context] },
+    { title: "Dependents", paths: descendants },
+  ];
+  const points = new Map<string, { x: number; y: number }>();
+  const boxWidth = 230;
+  const rowHeight = 30;
+  const height = 50 + Math.max(...columns.map(({ paths }) => paths.length), 1) * rowHeight;
+  columns.forEach(({ paths }, column) => paths.forEach((path, row) => points.set(path, { x: 10 + column * 308, y: 42 + row * rowHeight })));
+  return <div className="impact-diagram" role="group" aria-label="File dependency graph">
+    <svg viewBox={`0 0 866 ${height}`} width="866" height={height} aria-label={`Dependencies and dependents of ${file}`}>
+      <defs><marker id="impact-arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="context-stroke" /></marker></defs>
+      {columns.map(({ title, paths }, i) => <text key={title} x={10 + i * 308} y={24} className="impact-heading">{title}{i !== 1 ? ` (${paths.length})` : ""}</text>)}
+      {unique.map(({ from, to }) => {
+        const start = points.get(from);
+        const end = points.get(to);
+        if (!start || !end) return null;
+        const highlighted = hover ? from === hover || to === hover : related.has(from) && related.has(to);
+        const backwards = start.x > end.x;
+        const x1 = start.x + (backwards ? 0 : boxWidth);
+        const x2 = end.x + (backwards ? boxWidth : 0);
+        const mid = start.x === end.x ? start.x + boxWidth + 35 : (x1 + x2) / 2;
+        const target = start.x === end.x ? end.x + boxWidth : x2;
+        return <path key={JSON.stringify([from, to])} className={`impact-edge ${highlighted ? "highlighted" : ""}`}
+          d={`M ${x1} ${start.y} C ${mid} ${start.y}, ${mid} ${end.y}, ${target} ${end.y}`} markerEnd="url(#impact-arrow)" />;
+      })}
+      {[...points].map(([path, pos]) => <g key={path} className={`impact-node ${path === file ? "current" : ""} ${related.has(path) ? "" : "unrelated"}`}
+        tabIndex={0} onMouseEnter={() => setHover(path)} onMouseLeave={() => setHover(null)} onFocus={() => setHover(path)} onBlur={() => setHover(null)}>
+        <title>{path}</title>
+        <rect x={pos.x} y={pos.y - 11} width={boxWidth} height={22} rx={5} />
+        <text x={pos.x + 8} y={pos.y + 4}>{path.length > 30 ? "…" + path.slice(-29) : path}</text>
+      </g>)}
+    </svg>
+    {ancestors.length === 0 && descendants.length === 0 && <p className="faint small">No connected files found in the available graph.</p>}
+  </div>;
 }

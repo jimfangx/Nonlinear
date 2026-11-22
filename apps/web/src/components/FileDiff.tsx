@@ -2,6 +2,8 @@ import { useMemo, useRef, useState, useEffect, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { parseFileHunks, toSplitRows, contains, type DiffLine, type Hunk, type FileReviewState, type Interval } from "@nonlinear/core";
 
+const LINE_HEIGHT = 20;
+
 export type DiffMode = "unified" | "split";
 
 /** One display row. `ri` = review row index (into flattened hunk lines) or null. */
@@ -9,6 +11,7 @@ type Row =
   | { t: "hunk"; hunk: Hunk; hi: number }
   | { t: "line"; line: DiffLine; ri: number; hi: number }
   | { t: "split"; left: DiffLine | null; right: DiffLine | null; ri: number[]; hi: number }
+  | { t: "annotation"; ri: number }
   | { t: "ctx"; text: string; no: number; label?: string };
 
 export interface ReviewOverlay {
@@ -27,7 +30,8 @@ export interface FileDiffProps {
   onSelect?: (iv: Interval | null, anchor: { line: DiffLine; ri: number } | null) => void;
   highlight?: string;
   /** annotations per review row (comments/notes markers) */
-  markers?: Map<number, ReactNode>;
+  annotations?: Map<number, ReactNode>;
+  onLineContext?: (event: React.MouseEvent, ri: number, line: DiffLine) => void;
   height?: number | string;
   scrollToRow?: number | null;
 }
@@ -37,9 +41,9 @@ export function useHunks(section: string): Hunk[] {
 }
 
 export function FileDiff(props: FileDiffProps) {
-  const { section, mode, expansions, onExpand, review, selection, onSelect, highlight, markers } = props;
+  const { section, mode, expansions, onExpand, review, selection, onSelect, highlight, annotations, onLineContext } = props;
   const hunks = useHunks(section);
-  const rows = useMemo(() => {
+  const diffRows = useMemo(() => {
     const out: Row[] = [];
     let ri = 0;
     hunks.forEach((h, hi) => {
@@ -62,10 +66,29 @@ export function FileDiff(props: FileDiffProps) {
     return out;
   }, [hunks, mode, expansions]);
 
+  const rows = useMemo(() => {
+    if (!annotations?.size) return diffRows;
+    return diffRows.flatMap((r): Row[] => {
+      const indices = r.t === "line" ? [r.ri] : r.t === "split" ? r.ri : [];
+      return [r, ...indices.filter((ri) => annotations.has(ri)).map((ri): Row => ({ t: "annotation", ri }))];
+    });
+  }, [diffRows, annotations]);
+
   const totalRows = useMemo(() => hunks.reduce((n, h) => n + h.lines.length, 0), [hunks]);
   const parentRef = useRef<HTMLDivElement>(null);
-  const virt = useVirtualizer({ count: rows.length, getScrollElement: () => parentRef.current, estimateSize: () => 20, overscan: 30 });
+  const virt = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: (i) => rows[i]?.t === "annotation" ? 100 : LINE_HEIGHT,
+    getItemKey: (i) => {
+      const row = rows[i];
+      return row?.t === "annotation" ? `annotation:${row.ri}` : i;
+    },
+    overscan: 30,
+  });
+  const layoutHeight = virt.getTotalSize();
   const [anchor, setAnchor] = useState<number | null>(null);
+  useEffect(() => { if (!selection) setAnchor(null); }, [selection]);
 
   useEffect(() => {
     if (props.scrollToRow == null) return;
@@ -108,20 +131,37 @@ export function FileDiff(props: FileDiffProps) {
   const selected = (ri: number) => !!selection && ri >= selection[0] && ri < selection[1];
 
   // Frontier rail: drag down to mark lines up to that location reviewed (§5.3)
+  const boundaries = useMemo(() => {
+    const positions = new Array<number>(totalRows + 1).fill(0);
+    let lastCodeEnd = 0;
+    rows.forEach((r, i) => {
+      const indices = r.t === "line" ? [r.ri] : r.t === "split" ? r.ri : [];
+      if (!indices.length) return;
+      lastCodeEnd = virt.measurementsCache[i]?.end ?? (i + 1) * LINE_HEIGHT;
+      indices.forEach((index) => { positions[index + 1] = lastCodeEnd; });
+    });
+    for (let i = 1; i < positions.length; i++) positions[i] = Math.max(positions[i]!, positions[i - 1]!);
+    positions[totalRows] = lastCodeEnd || layoutHeight;
+    return positions;
+  }, [rows, totalRows, layoutHeight, virt]);
   const railRef = useRef<HTMLDivElement>(null);
   const onRailDown = (e: React.PointerEvent) => {
     if (!review) return;
     e.preventDefault();
-    const rect = railRef.current!.getBoundingClientRect();
-    const toRow = (y: number) => Math.round(Math.max(0, Math.min(1, (y - rect.top) / rect.height)) * totalRows);
-    review.setFrontier(toRow(e.clientY));
-    const move = (ev: PointerEvent) => review.setFrontier(toRow(ev.clientY));
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    e.currentTarget.setPointerCapture(e.pointerId);
+    moveFrontier(e.clientY);
+  };
+  const moveFrontier = (y: number) => {
+    if (!review || !railRef.current) return;
+    const offset = y - railRef.current.getBoundingClientRect().top;
+    let low = 0;
+    let high = boundaries.length - 1;
+    while (low < high) {
+      const mid = Math.ceil((low + high) / 2);
+      if (boundaries[mid]! <= offset) low = mid;
+      else high = mid - 1;
+    }
+    review.setFrontier(low);
   };
   const onRailKey = (e: React.KeyboardEvent) => {
     if (!review) return;
@@ -131,16 +171,18 @@ export function FileDiff(props: FileDiffProps) {
     if (e.key === "End") { e.preventDefault(); review.setFrontier(totalRows); }
     if (e.key === "Home") { e.preventDefault(); review.setFrontier(0); }
   };
-  const pct = (n: number) => `${totalRows ? (n / totalRows) * 100 : 0}%`;
+  const yOf = (n: number) => boundaries[Math.max(0, Math.min(n, totalRows))] ?? 0;
 
   if (!hunks.length) return <div className="empty small">No textual changes (binary, mode-only, rename-only, or empty patch).</div>;
 
   return (
-    <div className="row" style={{ alignItems: "stretch", gap: 4, height: props.height ?? "100%", minHeight: 0 }}>
-      {review && (
+    <div ref={parentRef} className="diff diff-scroll" style={{ height: props.height ?? "100%" }}>
+      <div className="diff-content" style={{ height: layoutHeight }}>
+      {review && totalRows > 0 && (
         <div
           ref={railRef}
           className="rail"
+          style={{ height: yOf(totalRows) }}
           role="slider"
           tabIndex={0}
           aria-label="Reviewed frontier"
@@ -149,26 +191,30 @@ export function FileDiff(props: FileDiffProps) {
           aria-valuenow={review.state.frontier}
           onPointerDown={onRailDown}
           onKeyDown={onRailKey}
+          onPointerMove={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) moveFrontier(e.clientY); }}
+          onPointerUp={(e) => { if (e.currentTarget.hasPointerCapture(e.pointerId)) moveFrontier(e.clientY); }}
           title="Drag down to mark lines reviewed. Arrow keys adjust; Shift = 50 lines."
         >
-          <div className="fill" style={{ height: pct(review.state.frontier) }} />
+          <div className="fill" style={{ height: yOf(review.state.frontier) }} />
           {review.state.reviewed.map(([a, b], i) => (
-            <div key={`r${i}`} className="seg" style={{ top: pct(a), height: pct(b - a), background: "var(--ok)", opacity: 0.6 }} />
+            <div key={`r${i}`} className="seg" style={{ top: yOf(a), height: yOf(b) - yOf(a), background: "var(--ok)", opacity: 0.6 }} />
           ))}
           {review.state.flagged.map(([a, b], i) => (
-            <div key={`f${i}`} className="seg" style={{ top: pct(a), height: `max(${pct(b - a)}, 3px)`, background: "var(--warn)" }} />
+            <div key={`f${i}`} className="seg" style={{ top: yOf(a), height: Math.max(yOf(b) - yOf(a), 3), background: "var(--warn)" }} />
           ))}
           {review.state.stale.map(([a, b], i) => (
-            <div key={`s${i}`} className="seg" style={{ top: pct(a), height: `max(${pct(b - a)}, 3px)`, background: "var(--err)" }} />
+            <div key={`s${i}`} className="seg" style={{ top: yOf(a), height: Math.max(yOf(b) - yOf(a), 3), background: "var(--err)" }} />
           ))}
-          <div className="handle" style={{ top: pct(review.state.frontier) }} />
+          <div className="handle" style={{ top: `clamp(3px, ${yOf(review.state.frontier)}px, calc(100% - 3px))` }} />
         </div>
       )}
-      <div ref={parentRef} className="diff grow" style={{ overflow: "auto", height: "100%" }}>
-        <div style={{ height: virt.getTotalSize(), position: "relative", minWidth: "max-content", width: "100%" }}>
+        <div className="diff-rows">
           {virt.getVirtualItems().map((vi) => {
             const r = rows[vi.index]!;
             const style = { position: "absolute" as const, top: 0, left: 0, right: 0, transform: `translateY(${vi.start}px)` };
+            if (r.t === "annotation") {
+              return <div key={vi.key} ref={virt.measureElement} data-index={vi.index} className="diff-annotation" style={style}>{annotations?.get(r.ri)}</div>;
+            }
             if (r.t === "hunk") {
               return (
                 <div key={vi.key} style={style} className="dl hunk">
@@ -199,7 +245,7 @@ export function FileDiff(props: FileDiffProps) {
               const l = r.line;
               const cls = l.kind === "add" ? "add" : l.kind === "del" ? "del" : "";
               return (
-                <div key={vi.key} style={style} className={`dl ${cls} ${reviewedAt(r.ri)} ${selected(r.ri) ? "sel" : ""}`}>
+                <div key={vi.key} style={style} className={`dl ${cls} ${reviewedAt(r.ri)} ${selected(r.ri) ? "sel" : ""}`} onContextMenu={(e) => onLineContext?.(e, r.ri, l)}>
                   <span className="no" onClick={(e) => clickLine(e, r.ri, l)}>
                     {l.oldNo ?? ""}
                   </span>
@@ -209,7 +255,6 @@ export function FileDiff(props: FileDiffProps) {
                   <span className="sign">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : l.kind === "meta" ? "\\" : " "}</span>
                   <span className="code">
                     {hl(l.text)}
-                    {markers?.get(r.ri)}
                   </span>
                 </div>
               );
@@ -219,7 +264,13 @@ export function FileDiff(props: FileDiffProps) {
             const rc = r.ri.map(reviewedAt).find(Boolean) ?? "";
             const sel = r.ri.some(selected);
             return (
-              <div key={vi.key} style={style} className={`dl split ${rc} ${sel ? "sel" : ""}`}>
+              <div key={vi.key} style={style} className={`dl split-line ${rc} ${sel ? "sel" : ""}`} onContextMenu={(e) => {
+                const cell = e.target instanceof Element ? e.target.closest(".dl > span") : null;
+                const useRight = !left || (!!right && cell !== null && Array.from(e.currentTarget.children).indexOf(cell) >= 3);
+                const line = useRight ? right : left;
+                const i = useRight ? r.ri.at(-1) : r.ri[0];
+                if (line && i !== undefined) onLineContext?.(e, i, line);
+              }}>
                 <span className={`no ${left && left.kind === "del" ? "del" : ""}`} onClick={(e) => left && clickLine(e, r.ri[0]!, left)}>
                   {left?.oldNo ?? ""}
                 </span>
@@ -231,7 +282,6 @@ export function FileDiff(props: FileDiffProps) {
                 <span className={`sign ${right?.kind === "add" ? "add" : right ? "" : "empty-side"}`}>{right?.kind === "add" ? "+" : " "}</span>
                 <span className={`code ${right?.kind === "add" ? "add" : right ? "" : "empty-side"}`}>
                   {right ? hl(right.text) : ""}
-                  {r.ri.map((x) => markers?.get(x)).filter(Boolean)}
                 </span>
               </div>
             );

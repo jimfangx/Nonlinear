@@ -62,9 +62,12 @@ export function ChainPanel({ pr, compact }: { pr: PRKey; compact?: boolean }) {
             <div key={m} className="panel" style={{ padding: "6px 8px", marginLeft: (layers.get(m) ?? 0) * (linear ? 0 : 14), borderColor: isSel ? "var(--accent)" : undefined, background: isSel ? "var(--accent-2)" : undefined }}>
               <div className="row small">
                 <span className="faint mono">{i + 1}.</span>
+                {isSel ? <span className="grow ellipsis" aria-current="true" title={p?.title}>
+                  <b>{ref.repo}#{ref.number}</b> <span className="muted">{p?.title ?? "(not loaded)"}</span>
+                </span> :
                 <Link to={`/pr/${ref.owner}/${ref.repo}/${ref.number}`} className="grow ellipsis" title={p?.title}>
                   <b>{ref.repo}#{ref.number}</b> <span className="muted">{p?.title ?? "(not loaded)"}</span>
-                </Link>
+                </Link>}
                 <span className={`chip ${ms.cls}`}>{ms.label}</span>
               </div>
               {!compact && prereqs.length > 0 && (

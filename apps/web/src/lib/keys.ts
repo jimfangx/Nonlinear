@@ -9,8 +9,8 @@ export function matches(e: KeyboardEvent, binding: string): boolean {
   const mod = parts.includes("mod");
   const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
   if (mod && !(isMac ? e.metaKey : e.ctrlKey)) return false;
-  if (!mod && (e.metaKey || e.ctrlKey)) return false;
-  if (parts.includes("shift") !== e.shiftKey && key.length > 1) return false;
+  if ((!mod && (e.metaKey || e.ctrlKey)) || (mod && e.metaKey && e.ctrlKey)) return false;
+  if (parts.includes("shift") !== e.shiftKey ) return false;
   if (parts.includes("alt") !== e.altKey) return false;
   return e.key.toLowerCase() === key;
 }
@@ -26,11 +26,12 @@ export function useActions(handlers: Partial<Record<Action, (e: KeyboardEvent) =
   ref.current = handlers;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const kb = useApp.getState().settings_().keybindings;
       for (const [action, fn] of Object.entries(ref.current)) {
         const b = kb[action] ?? DEFAULT_KEYS[action as Action];
         if (!b || !fn) continue;
-        if (!b.includes("mod") && typing(e)) continue;
+        if (!b.includes("mod") && (typing(e) || document.querySelector(".overlay:not([inert]), #workspace-content[inert]"))) continue;
         if (matches(e, b)) {
           e.preventDefault();
           fn(e);

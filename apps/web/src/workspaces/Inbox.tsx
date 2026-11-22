@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { CATEGORY_LABELS, summarizeEvents, classify, isSnoozed, isUnread, newId, type Category, type PRSnapshot } from "@nonlinear/core";
 import { useApp, useSettings, type RepositoryView } from "../lib/store";
@@ -17,12 +17,32 @@ export function Inbox() {
   const views = useApp((s) => s.views);
   const nav = useNavigate();
   const [editing, setEditing] = useState<RepositoryView | null>(null);
+  const [params, setParams] = useSearchParams();
+  const requested = params.get("pr");
+  const creating = params.has("newView");
+  const [draft] = useState(newView);
+  const closeEditor = () => {
+    setEditing(null);
+    if (creating) setParams((previous) => {
+      const next = new URLSearchParams(previous);
+      next.delete("newView");
+      return next;
+    }, { replace: true });
+  };
+  const editor = (creating || editing) && <ViewEditor view={creating ? draft : editing!} onClose={closeEditor} />;
   const view = viewId ? views[viewId] : Object.values(views).sort((a, b) => a.createdAt - b.createdAt)[0];
 
   useEffect(() => {
-    if (!viewId && view) nav(`/inbox/${view.id}`, { replace: true });
-  }, [viewId, view, nav]);
+    if (!viewId && view && !creating) nav(`/inbox/${view.id}${params.size ? "?" + params : ""}`, { replace: true });
+  }, [viewId, view, nav, creating, params]);
 
+  if (!view && requested) {
+    return <div className="inbox-layout inbox-without-view">
+      <aside className="empty">Create a repository view to populate the Inbox.</aside>
+      <InboxDetail prKey={requested} close={() => nav("/inbox", { replace: true })} />
+      {editor}
+    </div>;
+  }
   if (!view) {
     return (
       <div className="page">
@@ -32,7 +52,7 @@ export function Inbox() {
             A view is a named set of repositories across any organizations. Public repositories work without signing in and without installing anything into those organizations.
           </p>
           <button className="btn primary" onClick={() => setEditing(newView())}>
-            New view
+            Create a view
           </button>
           <button
             className="btn"
@@ -46,18 +66,18 @@ export function Inbox() {
             Use “Chipyard integration” example
           </button>
         </div>
-        {editing && <ViewEditor view={editing} onClose={() => setEditing(null)} />}
+        {editor}
       </div>
     );
   }
-  return <InboxView key={view.id} view={view} onEdit={() => setEditing(view)} editing={editing} setEditing={setEditing} />;
+  return <><InboxView key={view.id} view={view} onEdit={() => setEditing(view)} requested={requested} />{editor}</>;
 }
 
 function newView(): RepositoryView {
   return { id: newId("view"), name: "New view", repos: [], category: "all-open", groupBy: "none", sort: "updated", releaseLens: null, createdAt: Date.now() };
 }
 
-function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView; onEdit: () => void; editing: RepositoryView | null; setEditing: (v: RepositoryView | null) => void }) {
+function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: () => void; requested: string | null }) {
   const prs = useApp((s) => s.prs);
   const prLocal = useApp((s) => s.prLocal);
   const prEvents = useApp((s) => s.prEvents);
@@ -67,15 +87,16 @@ function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView
   const put = useApp((s) => s.put);
   const patch = useApp((s) => s.patch);
   const toast = useApp((s) => s.toast);
-  const nav = useNavigate();
+  const [, setParams] = useSearchParams();
   const { graph } = useChainGraph();
   const [q, setQ] = useState("");
   const [cat, setCat] = useState<Category>((view.category as Category) ?? "all-open");
   const [showSnoozed, setShowSnoozed] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [focus, setFocus] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
-  const [current, setCurrent] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const current = requested;
+  const activePR = current ? prs[current] : undefined;
 
   const repoSet = useMemo(() => new Set(view.repos), [view.repos]);
   const viewPRs = useMemo(() => Object.values(prs).filter((p) => repoSet.has(`${p.owner}/${p.repo}`.toLowerCase())), [prs, repoSet]);
@@ -119,8 +140,9 @@ function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView
       for (const p of xs) comp.set(p.key, graph.component(p.key).sort()[0]!);
       xs.sort((a, b) => comp.get(a.key)!.localeCompare(comp.get(b.key)!));
     }
+    if (requested && activePR && !xs.some((p) => p.key === requested)) xs.unshift(activePR);
     return xs;
-  }, [viewPRs, cats, cat, q, prLocal, showSnoozed, view.sort, view.groupBy, graph, lensSet]);
+  }, [requested, activePR, viewPRs, cats, cat, q, prLocal, showSnoozed, view.sort, view.groupBy, graph, lensSet]);
 
   const groupOf = (p: PRSnapshot): string | null => {
     if (view.groupBy === "repo") return `${p.owner}/${p.repo}`;
@@ -150,29 +172,46 @@ function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView
 
   useEffect(() => {
     const newest = Math.max(0, ...viewPRs.map((p) => p.fetchedAt));
-    if (Date.now() - newest > 10 * 60_000 && useApp.getState().online) void refresh();
+    if (!requested && Date.now() - newest > 10 * 60_000 && useApp.getState().online) void refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.id]);
 
-  const open = (p: PRSnapshot) => {
-    setCurrent(p.key);
-    const prev = prLocal[p.key] ?? {};
-    put("prLocal", p.key, { ...prev, lastViewedAt: Date.now(), lastViewedUpdatedAt: p.updatedAt });
+  const entries: ({ group: string } | { pr: PRSnapshot })[] = [];
+  let previousGroup: string | null = null;
+  for (const pr of list) {
+    const group = groupOf(pr);
+    if (group && group !== previousGroup) entries.push({ group });
+    previousGroup = group;
+    if (view.groupBy !== "repo" || !group || !collapsed.has(group)) entries.push({ pr });
+  }
+
+  const visiblePRs = entries.flatMap((entry) => "pr" in entry ? [entry.pr] : []);
+  const focus = visiblePRs.findIndex((p) => p.key === current);
+  const selectPR = (key: string | null) => {
+    if (key === current) return;
+    setParams((existing) => {
+      const next = new URLSearchParams(existing);
+      if (key) next.set("pr", key);
+      else next.delete("pr");
+      return next;
+    }, { replace: true });
   };
 
-  useActions(
-    {
-      next: () => setFocus((f) => Math.min(list.length - 1, f + 1)),
-      prev: () => setFocus((f) => Math.max(0, f - 1)),
-    },
-    [list.length],
-  );
+  useActions({
+    next: () => { if (visiblePRs.length) selectPR(visiblePRs[Math.min(visiblePRs.length - 1, focus + 1)]!.key); },
+    prev: () => { if (visiblePRs.length) selectPR(visiblePRs[Math.max(0, focus - 1)]!.key); },
+  });
 
   useEffect(() => {
-    const p = list[focus];
-    if (p) open(p);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [focus]);
+    if (!activePR) return;
+    const { prLocal, put } = useApp.getState();
+    if (view.groupBy === "repo") setCollapsed((old) => {
+      const group = `${activePR.owner}/${activePR.repo}`;
+      if (!old.has(group)) return old;
+      const next = new Set(old); next.delete(group); return next;
+    });
+    put("prLocal", activePR.key, { ...prLocal[activePR.key], lastViewedAt: Date.now(), lastViewedUpdatedAt: activePR.updatedAt });
+  }, [activePR?.key]);
 
   const bulk = (fn: (k: string) => void) => {
     const keys = selected.size ? [...selected] : current ? [current] : [];
@@ -181,9 +220,76 @@ function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView
   };
 
   const parentRef = useRef<HTMLDivElement>(null);
-  const virt = useVirtualizer({ count: list.length, getScrollElement: () => parentRef.current, estimateSize: () => 60, overscan: 12 });
-  useEffect(() => virt.scrollToIndex(focus, { align: "auto" }), [focus, virt]);
+  const virt = useVirtualizer({ count: entries.length, getScrollElement: () => parentRef.current, estimateSize: () => 60, overscan: 12 });
+  const selectedIndex = entries.findIndex((entry) => "pr" in entry && entry.pr.key === current);
+  useEffect(() => { if (selectedIndex >= 0) virt.scrollToIndex(selectedIndex, { align: "auto" }); }, [selectedIndex, virt]);
   const newest = Math.max(0, ...viewPRs.map((p) => p.fetchedAt));
+
+  const listPane = (
+    <div ref={parentRef} className="inbox-list" aria-label="Pull requests">
+      {!list.length && <div className="empty">{viewPRs.length ? "No PRs in this category." : busy ? busy : "No cached PRs yet. Refresh to fetch."}</div>}
+      <div style={{ height: virt.getTotalSize(), position: "relative" }}>
+        {virt.getVirtualItems().map((vi) => {
+          const entry = entries[vi.index]!;
+          const style = { position: "absolute" as const, top: 0, left: 0, right: 0, transform: `translateY(${vi.start}px)` };
+          if ("group" in entry) {
+            const group = entry.group;
+            const closed = collapsed.has(group);
+            return <div key={`group:${vi.index}:${group}`} style={style} data-index={vi.index} ref={virt.measureElement}>
+              {view.groupBy === "repo" ? <button className="inbox-group" aria-expanded={!closed} onClick={() => {
+                const next = new Set(collapsed);
+                if (closed) next.delete(group);
+                else {
+                  next.add(group);
+                  if (activePR && groupOf(activePR) === group) selectPR(null);
+                }
+                setCollapsed(next);
+              }}><span aria-hidden="true">{closed ? "▸" : "▾"}</span> {group}</button> : <h3 className="inbox-group h3">{group}</h3>}
+            </div>;
+          }
+          const p = entry.pr;
+          const unread = isUnread(p, prLocal[p.key]);
+          return (
+            <div key={p.key} style={style} data-index={vi.index} ref={virt.measureElement}>
+              <div
+                aria-current={current === p.key ? "true" : undefined}
+                className={`list-row ${current === p.key ? "selected" : ""} ${current === p.key ? "focused" : ""}`}
+                onClick={(e) => {
+                  if (e.metaKey || e.ctrlKey || e.shiftKey) {
+                    const s = new Set(selected);
+                    s.has(p.key) ? s.delete(p.key) : s.add(p.key);
+                    setSelected(s);
+                    return;
+                  }
+                  selectPR(p.key);
+                }}
+              >
+                <input type="checkbox" aria-label={`Select ${p.key}`} checked={selected.has(p.key)} onClick={(e) => e.stopPropagation()} onChange={() => { const s = new Set(selected); s.has(p.key) ? s.delete(p.key) : s.add(p.key); setSelected(s); }} />
+                <span className="dot" style={{ background: unread ? "var(--accent)" : "transparent" }} title={unread ? "Updated since you last viewed" : ""} />
+                <div className="grow" style={{ minWidth: 0 }}>
+                  <div className="ellipsis">
+                    {prLocal[p.key]?.pinned && "📌 "}
+                    <b style={{ fontWeight: unread ? 600 : 500 }}>{p.title}</b>
+                  </div>
+                  <div className="faint small ellipsis">
+                    {p.owner}/{p.repo}#{p.number} · {p.author} · {timeAgo(p.updatedAt)}
+                    {blocked.has(p.key) && " · ⛓ blocked"}
+                  </div>
+                  {(() => {
+                    const sum = summarizeEvents(prEvents[p.key] ?? [], prLocal[p.key]?.lastViewedAt);
+                    return sum ? <div className="small ellipsis" style={{ color: "var(--accent)" }} title="Since you last viewed">↳ {sum}</div> : null;
+                  })()}
+                </div>
+                <PRStateChip pr={p} />
+                <ReviewChip d={p.reviewDecision} />
+                <CIChip ci={p.ci} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 
   return (
     <>
@@ -191,9 +297,6 @@ function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView
         <h1 className="toolbar-title">{view.name}</h1>
         <button className="btn sm" onClick={onEdit}>
           Edit view
-        </button>
-        <button className="btn sm" onClick={() => setEditing(newView())}>
-          + New view
         </button>
         <input className="input" style={{ width: 240 }} placeholder="Filter PRs…" value={q} onChange={(e) => setQ(e.target.value)} />
         <select className="input" value={view.groupBy} onChange={(e) => patch("views", view.id, { groupBy: e.target.value as RepositoryView["groupBy"] })} aria-label="Group by">
@@ -207,11 +310,11 @@ function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView
           <option value="created">Newest</option>
           <option value="repo">Repository</option>
         </select>
-        <select className="input" value={view.releaseLens ?? ""} onChange={(e) => patch("views", view.id, { releaseLens: e.target.value || null })} aria-label="Release lens">
-          <option value="">No release lens</option>
+        <select className="input" value={view.releaseLens ?? ""} onChange={(e) => patch("views", view.id, { releaseLens: e.target.value || null })} aria-label="Release lens" title="Show only pull requests attached to cards in this release, plus their direct prerequisites.">
+          <option value="">No release filter</option>
           {Object.values(releases).map((r) => (
             <option key={r.id} value={r.id}>
-              Lens: {r.name}
+              Release: {r.name}
             </option>
           ))}
         </select>
@@ -240,7 +343,7 @@ function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView
             className={`tab ${cat === c ? "active" : ""}`}
             onClick={() => {
               setCat(c);
-              setFocus(0);
+              selectPR(null);
               patch("views", view.id, { category: c });
             }}
           >
@@ -248,65 +351,21 @@ function InboxView({ view, onEdit, editing, setEditing }: { view: RepositoryView
           </button>
         ))}
       </div>
-      <div style={{ flex: 1, minHeight: 0 }}>
-        <Split id="inbox" initial={0.48}>
-          <div ref={parentRef} style={{ height: "100%", overflow: "auto" }} aria-label="Pull requests">
-            {!list.length && <div className="empty">{viewPRs.length ? "No PRs in this category." : busy ? busy : "No cached PRs yet. Refresh to fetch."}</div>}
-            <div style={{ height: virt.getTotalSize(), position: "relative" }}>
-              {virt.getVirtualItems().map((vi) => {
-                const p = list[vi.index]!;
-                const g = groupOf(p);
-                const prevG = vi.index > 0 ? groupOf(list[vi.index - 1]!) : null;
-                const unread = isUnread(p, prLocal[p.key]);
-                return (
-                  <div key={p.key} style={{ position: "absolute", top: 0, left: 0, right: 0, transform: `translateY(${vi.start}px)` }} data-index={vi.index} ref={virt.measureElement}>
-                    {g && g !== prevG && <h3 className="h3" style={{ padding: "10px 12px 4px", margin: 0, background: "var(--bg-2)" }}>{g}</h3>}
-                    <div
-                      aria-current={current === p.key ? "true" : undefined}
-                      className={`list-row ${current === p.key ? "selected" : ""} ${vi.index === focus ? "focused" : ""}`}
-                      onClick={(e) => {
-                        if (e.metaKey || e.ctrlKey || e.shiftKey) {
-                          const s = new Set(selected);
-                          s.has(p.key) ? s.delete(p.key) : s.add(p.key);
-                          setSelected(s);
-                          return;
-                        }
-                        setFocus(vi.index);
-                        open(p);
-                      }}
-                      onDoubleClick={() => nav(`/pr/${p.owner}/${p.repo}/${p.number}`)}
-                    >
-                      <input type="checkbox" aria-label={`Select ${p.key}`} checked={selected.has(p.key)} onClick={(e) => e.stopPropagation()} onChange={() => { const s = new Set(selected); s.has(p.key) ? s.delete(p.key) : s.add(p.key); setSelected(s); }} />
-                      <span className="dot" style={{ background: unread ? "var(--accent)" : "transparent" }} title={unread ? "Updated since you last viewed" : ""} />
-                      <div className="grow" style={{ minWidth: 0 }}>
-                        <div className="ellipsis">
-                          {prLocal[p.key]?.pinned && "📌 "}
-                          <b style={{ fontWeight: unread ? 600 : 500 }}>{p.title}</b>
-                        </div>
-                        <div className="faint small ellipsis">
-                          {p.owner}/{p.repo}#{p.number} · {p.author} · {timeAgo(p.updatedAt)}
-                          {blocked.has(p.key) && " · ⛓ blocked"}
-                        </div>
-                        {(() => {
-                          const sum = summarizeEvents(prEvents[p.key] ?? [], prLocal[p.key]?.lastViewedAt);
-                          return sum ? <div className="small ellipsis" style={{ color: "var(--accent)" }} title="Since you last viewed">↳ {sum}</div> : null;
-                        })()}
-                      </div>
-                      <PRStateChip pr={p} />
-                      <ReviewChip d={p.reviewDecision} />
-                      <CIChip ci={p.ci} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-          <div style={{ height: "100%", overflow: "auto" }}>{current && prs[current] ? <PRDetail prKey={current} /> : <div className="empty">Select a PR (j/k to navigate)</div>}</div>
+      <div className="inbox-layout">
+        <Split id="inbox" initial={0.46} showSecond={!!current}>
+          {listPane}
+          {current && <InboxDetail prKey={current} close={() => selectPR(null)} />}
         </Split>
       </div>
-      {editing && <ViewEditor view={editing} onClose={() => setEditing(null)} />}
     </>
   );
+}
+
+function InboxDetail({ prKey, close }: { prKey: string; close: () => void }) {
+  return <section className="inbox-detail" aria-label="Pull request details">
+    <div className="inbox-detail-header"><span>Pull request details</span><button className="btn ghost sm" onClick={close} aria-label="Close pull request details" title="Close pull request details">✕</button></div>
+    <PRDetail key={prKey} prKey={prKey} />
+  </section>;
 }
 
 function ViewEditor({ view, onClose }: { view: RepositoryView; onClose: () => void }) {

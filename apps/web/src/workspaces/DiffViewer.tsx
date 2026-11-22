@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { filterFiles, parseGitmodules, submoduleMap, LARGE_IMPORT_WARN_BYTES, type DiffFileEntry, type MultiRepoDiff, type RepoGroup } from "@nonlinear/core";
@@ -43,6 +43,8 @@ export function DiffWorkspace() {
   const [root, setRoot] = useState("ucb-bar/chipyard");
   const [rootRef, setRootRef] = useState("main");
   const fileRef = useRef<HTMLInputElement>(null);
+  const importing = useRef(false);
+  const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
     if (!id) return setDiff(null);
@@ -60,6 +62,8 @@ export function DiffWorkspace() {
   }, [id, diffs]);
 
   const importFile = async (f: File) => {
+    if (importing.current) return;
+    importing.current = true;
     try {
       if (f.size > LARGE_IMPORT_WARN_BYTES) useApp.getState().toast("info", `${(f.size / 1048576).toFixed(1)} MB is above the 50 MB target: patches are spilled to disk and loaded per file.`);
       let subs: WorkerIn["submodules"];
@@ -79,12 +83,32 @@ export function DiffWorkspace() {
     } catch (e) {
       setStatus(null);
       useApp.getState().toast("error", (e as Error).message);
+    } finally {
+      importing.current = false;
     }
+  };
+
+  const dropHandlers = {
+    onDragOver: (event: DragEvent<HTMLDivElement>) => {
+      if (!event.dataTransfer.types.includes("Files")) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+      setDragging(true);
+    },
+    onDragLeave: (event: DragEvent<HTMLDivElement>) => {
+      if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) setDragging(false);
+    },
+    onDrop: (event: DragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      setDragging(false);
+      const file = event.dataTransfer.files[0];
+      if (file) void importFile(file);
+    },
   };
 
   if (!id || !diff) {
     return (
-      <div className="page">
+      <div className="page" {...dropHandlers}>
         <h1 className="h1">Multi-Repository Diff</h1>
         <p className="muted">Import a JSON object mapping relative submodule path → unified diff string. The empty key "" is the root repository. Nothing in the file is executed, and importing implies no GitHub change.</p>
         <div className="panel pad col" style={{ maxWidth: 720 }}>
@@ -98,20 +122,14 @@ export function DiffWorkspace() {
               <input className="input" value={rootRef} onChange={(e) => setRootRef(e.target.value)} />
             </label>
           </div>
-          <div
-            className="panel pad"
-            style={{ borderStyle: "dashed", textAlign: "center", cursor: "pointer" }}
-            onClick={() => fileRef.current?.click()}
-            onDragOver={(e) => e.preventDefault()}
-            onDrop={(e) => {
-              e.preventDefault();
-              const f = e.dataTransfer.files[0];
-              if (f) void importFile(f);
-            }}
-          >
+          <button type="button" className={`panel pad diff-drop ${dragging ? "drag-over" : ""}`} onClick={() => fileRef.current?.click()}>
             Drop a .json diff here or click to choose
-            <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={(e) => e.target.files?.[0] && void importFile(e.target.files[0])} />
-          </div>
+          </button>
+          <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={(e) => {
+            const file = e.currentTarget.files?.[0];
+            e.currentTarget.value = "";
+            if (file) void importFile(file);
+          }} />
           {status && <div className="faint small">{status}</div>}
         </div>
         {Object.keys(diffs).length > 0 && (
@@ -146,7 +164,10 @@ export function DiffWorkspace() {
       </div>
     );
   }
-  return <DiffView diff={diff} />;
+  return <div className="active-diff-workspace" {...dropHandlers}>
+    <DiffView diff={diff} />
+    {(dragging || status) && <div className="panel pad diff-drop-status" role="status">{dragging ? "Drop to import a new JSON diff" : status}</div>}
+  </div>;
 }
 
 async function resolveSubmodules(root: string | null, ref: string): Promise<WorkerIn["submodules"]> {

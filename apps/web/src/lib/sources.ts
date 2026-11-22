@@ -8,7 +8,7 @@ import { desktop, invoke, isDesktop } from "./platform";
 import { useApp } from "./store";
 
 export type Source =
-  | { kind: "github" }
+  | { kind: "github"; transport?: "api" }
   | { kind: "local"; path: string }
   | { kind: "ssh"; alias: string; root: string; repo: string }
   /** managed blob-less partial mirror in the desktop app's cache (§9) */

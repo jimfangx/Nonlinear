@@ -55,6 +55,108 @@ pub fn ensure_mirror(data_dir: &Path, repo_key: &str, fetch: bool) -> Result<Pat
     ensure_mirror_from(&url, &mirror_path(data_dir, &o, &r), fetch)
 }
 
+/// Fetch a bounded timeline ref into a bare object cache. The root needs trees
+/// for .gitmodules and gitlinks, while child history needs only commit objects.
+pub fn timeline_fetch(data_dir: &Path, repo_key: &str, rev: &str, depth: usize, trees: bool, since: Option<&str>) -> Result<(PathBuf, String), GitError> {
+    let (url, owner, repo) = github_url(repo_key)?;
+    let cache = data_dir.join(if trees { "timeline-trees" } else { "timeline-history" }).join(owner).join(repo);
+    let depth = depth.clamp(1, 20_000);
+    if rev.starts_with('-') { return Err(GitError("expected a remote ref or SHA".into())); }
+    validate_rev(rev)?;
+    let window = since.filter(|date| {
+        date.len() == 10 && date.bytes().enumerate().all(|(i, b)| {
+            if i == 4 || i == 7 { b == b'-' } else { b.is_ascii_digit() }
+        })
+    });
+    if since.is_some() && window.is_none() { return Err(GitError("expected YYYY-MM-DD".into())); }
+    let slot = match window {
+        Some(date) => format!("refs/nonlinear/since/{date}/{rev}"),
+        None => format!("refs/nonlinear/{depth}/{rev}"),
+    };
+    let locks = TIMELINE_LOCKS.get_or_init(|| std::array::from_fn(|_| std::sync::Mutex::new(())));
+    let bucket = cache.to_string_lossy().bytes().map(usize::from).sum::<usize>() % locks.len();
+    let _guard = locks[bucket].lock().map_err(|e| GitError(e.to_string()))?;
+    timeline_fetch_from(&url, &cache, rev, &slot, depth, trees, window)?;
+    Ok((cache, slot))
+}
+
+static TIMELINE_LOCKS: std::sync::OnceLock<[std::sync::Mutex<()>; 32]> = std::sync::OnceLock::new();
+
+fn timeline_fetch_from(url: &str, cache: &Path, rev: &str, slot: &str, depth: usize, trees: bool, since: Option<&str>) -> Result<(), GitError> {
+    std::fs::create_dir_all(cache).map_err(|e| GitError(e.to_string()))?;
+    let short = Duration::from_secs(10);
+    git_global(&["check-ref-format", slot], cache, short)?;
+    if !cache.join("HEAD").is_file() {
+        git_global(&["init", "--bare", "--quiet"], cache, short)?;
+    }
+    let filter = if trees { "blob:none" } else { "tree:0" };
+    let spec = format!("{rev}^{{commit}}");
+    let immutable = rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit());
+    if immutable && git_global(&["rev-parse", "--verify", &spec], cache, short).is_ok() {
+        git_global(&["update-ref", slot, rev], cache, short)?;
+        return Ok(());
+    }
+
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    slot.hash(&mut hasher);
+    let stamp = cache.join(format!("nonlinear-fetch-{:016x}", hasher.finish()));
+    if let Ok(age) = std::fs::metadata(&stamp).and_then(|m| m.modified()).and_then(|m| {
+        m.elapsed().map_err(std::io::Error::other)
+    }) {
+        if age < Duration::from_secs(30 * 60) { return Ok(()); }
+    }
+
+    git_global(&["config", "remote.origin.url", url], cache, short)?;
+    git_global(&["config", "remote.origin.promisor", "true"], cache, short)?;
+    git_global(&["config", "credential.helper", ""], cache, short)?;
+    git_global(&["config", "remote.origin.partialclonefilter", filter], cache, short)?;
+    let refspec = format!("+{rev}:{slot}");
+    let fetch = |history: &str| git_global(&[
+        "-c", "credential.helper=", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+        &format!("--filter={filter}"), history, "origin", &refspec,
+    ], cache, Duration::from_secs(90));
+    let depth_arg = format!("--depth={depth}");
+    let fetched = match since {
+        Some(date) => fetch(&format!("--shallow-since={date}T00:00:00Z")).or_else(|_| fetch("--depth=1")),
+        None => fetch(&depth_arg),
+    };
+    if fetched.is_err() && git_global(&["show-ref", "--verify", "--quiet", slot], cache, short).is_ok() {
+        return Ok(());
+    }
+    fetched?;
+    std::fs::write(stamp, []).map_err(|e| GitError(e.to_string()))
+}
+
+#[derive(serde::Serialize)]
+pub struct TimelineRefs {
+    pub branch: Option<String>,
+    pub branches: Vec<(String, String)>,
+    pub tags: Vec<(String, String)>,
+}
+
+pub fn timeline_refs(repo_key: &str, cwd: &Path) -> Result<TimelineRefs, GitError> {
+    let (url, _, _) = github_url(repo_key)?;
+    let output = git_global(&["-c", "credential.helper=", "ls-remote", "--symref", &url, "HEAD", "refs/heads/*", "refs/tags/*"], cwd, Duration::from_secs(20))?;
+    let mut branch = None;
+    let mut tags = std::collections::BTreeMap::new();
+    let mut branches = Vec::new();
+    for line in output.lines() {
+        let Some((value, reference)) = line.split_once('\t') else { continue };
+        if reference == "HEAD" {
+            if let Some(name) = value.strip_prefix("ref: refs/heads/") { branch = Some(name.to_owned()); }
+        }
+        if let Some(name) = reference.strip_prefix("refs/heads/") {
+            branches.push((name.to_owned(), value.to_owned()));
+        }
+        if let Some(name) = reference.strip_prefix("refs/tags/") {
+            let name = name.strip_suffix("^{}").unwrap_or(name);
+            tags.insert(name.to_owned(), value.to_owned());
+        }
+    }
+    Ok(TimelineRefs { branch, branches, tags: tags.into_iter().collect() })
+}
+
 /// Make sure `sha` is present (e.g. a PR head that isn't on any branch).
 pub fn ensure_commit(repo: &Path, sha: &str) -> Result<(), GitError> {
     validate_rev(sha)?;
@@ -131,6 +233,22 @@ mod tests {
 
         let data = base.join("data");
         let url = format!("file://{}", src.display());
+        let thin = data.join("timeline");
+        timeline_fetch_from(&url, &thin, "HEAD", "refs/nonlinear/1/HEAD", 1, true, None).unwrap();
+        let tip = crate::git::log(&thin, "refs/nonlinear/1/HEAD", 10).unwrap();
+        assert_eq!(tip.len(), 1);
+        assert_eq!(crate::git::show_file(&thin, &tip[0].sha, "a.txt").unwrap(), "two");
+        let history = data.join("history");
+        timeline_fetch_from(&url, &history, "HEAD", "refs/nonlinear/2/HEAD", 2, false, None).unwrap();
+        let log = crate::git::log(&history, "refs/nonlinear/2/HEAD", 10).unwrap();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[1].sha, first);
+        timeline_fetch_from(&url, &history, &first, "refs/nonlinear/pin", 1, false, None).unwrap();
+        assert_eq!(crate::git::log(&history, "refs/nonlinear/pin", 1).unwrap()[0].sha, first);
+        assert!(timeline_fetch_from(&url, &history, "--all", "refs/nonlinear/--all", 1, false, None).is_err());
+        let dated = data.join("dated-history");
+        timeline_fetch_from(&url, &dated, "HEAD", "refs/nonlinear/since/2000-01-01/HEAD", 1, false, Some("2000-01-01")).unwrap();
+        assert_eq!(crate::git::log(&dated, "refs/nonlinear/since/2000-01-01/HEAD", 10).unwrap().len(), 2);
         let m = ensure_mirror_from(&url, &data.join("mirrors/o/r.git"), false).unwrap();
         assert!(m.join("HEAD").exists());
         assert!(!crate::git::log(&m, "--all", 10).unwrap().is_empty());

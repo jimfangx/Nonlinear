@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nonlinear</title>
+<meta name="description" content="The release workbench for maintainers whose work doesn't fit in one repo. PR triage, cross-repo chains, submodule pinning and large-diff review — local-first and GitHub-native.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #fbfbfc; --bg-2: #f3f3f6; --panel: #ffffff;
+  --border: #e2e2ea; --border-strong: #cfcfda;
+  --text: #1b1b24; --text-2: #55556a; --text-3: #62627a;
+  --accent: #5b4bd6; --accent-2: #ede9ff; --on-accent: #fff;
+  --ok: #137236; --ok-bg: #e3f6eb; --warn: #8a5a0f; --warn-bg: #fdf3dc;
+  --err: #c03030; --info: #1a5fb8; --info-bg: #e5f0fd;
+  --add-bg: #e6f7ec; --del-bg: #fdecec; --hunk-bg: #f0eefc;
+  --glow: rgba(91,75,214,.18);
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f0f14; --bg-2: #16161d; --panel: #18181f;
+    --border: #2a2a35; --border-strong: #3a3a48;
+    --text: #ececf3; --text-2: #b4b4c8; --text-3: #9a9ab0;
+    --accent: #a497ff; --accent-2: #2a2550; --on-accent: #16161d;
+    --ok: #5fd39a; --ok-bg: #173325; --warn: #f0c070; --warn-bg: #3a2e14;
+    --err: #ff8f8f; --info: #86b8ff; --info-bg: #1a2a44;
+    --add-bg: #15291e; --del-bg: #2e1719; --hunk-bg: #211f38;
+    --glow: rgba(164,151,255,.16);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f0f14; --bg-2: #16161d; --panel: #18181f;
+  --border: #2a2a35; --border-strong: #3a3a48;
+  --text: #ececf3; --text-2: #b4b4c8; --text-3: #9a9ab0;
+  --accent: #a497ff; --accent-2: #2a2550; --on-accent: #16161d;
+  --ok: #5fd39a; --ok-bg: #173325; --warn: #f0c070; --warn-bg: #3a2e14;
+  --err: #ff8f8f; --info: #86b8ff; --info-bg: #1a2a44;
+  --add-bg: #15291e; --del-bg: #2e1719; --hunk-bg: #211f38;
+  --glow: rgba(164,151,255,.16);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+a { color: inherit; }
+.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
+@media (min-width: 720px) { .wrap { padding: 0 32px; } }
+
+/* nav */
+nav { position: sticky; top: 0; z-index: 10; backdrop-filter: saturate(1.6) blur(12px); background: color-mix(in srgb, var(--bg) 78%, transparent); border-bottom: 1px solid var(--border); }
+nav .wrap { display: flex; align-items: center; gap: 24px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; text-decoration: none; }
+.brand img { width: 28px; height: 28px; }
+.navlinks { display: none; gap: 22px; margin-left: auto; font-size: 14px; color: var(--text-2); }
+.navlinks a { text-decoration: none; }
+.navlinks a:hover { color: var(--text); }
+@media (min-width: 760px) { .navlinks { display: flex; } }
+.nav-cta { margin-left: auto; }
+@media (min-width: 760px) { .nav-cta { margin-left: 0; } }
+
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 9px; font-weight: 600; font-size: 15px; text-decoration: none; border: 1px solid transparent; transition: transform .12s, box-shadow .12s, background .12s; white-space: nowrap; }
+.btn:hover { transform: translateY(-1px); }
+.btn-primary { background: var(--accent); color: var(--on-accent); box-shadow: 0 6px 20px var(--glow); }
+.btn-ghost { border-color: var(--border-strong); background: var(--panel); }
+.btn-sm { padding: 7px 14px; font-size: 14px; }
+
+/* hero */
+.hero { position: relative; padding: 72px 0 40px; text-align: center; }
+.hero::before { content: ""; position: absolute; inset: -120px 0 auto; height: 620px; background: radial-gradient(600px 300px at 50% 30%, var(--glow), transparent 70%); pointer-events: none; z-index: -1; }
+.eyebrow { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; font-weight: 500; color: var(--text-2); border: 1px solid var(--border); background: var(--panel); padding: 5px 12px; border-radius: 99px; }
+.eyebrow b { color: var(--accent); font-weight: 600; }
+h1 { font-size: clamp(38px, 7vw, 68px); line-height: 1.04; letter-spacing: -.035em; margin: 22px auto 18px; max-width: 900px; font-weight: 800; }
+h1 em { font-style: normal; background: linear-gradient(100deg, var(--accent), #e06ad8 70%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.lede { font-size: clamp(17px, 2.2vw, 20px); color: var(--text-2); max-width: 680px; margin: 0 auto 32px; }
+.ctas { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.fine { margin-top: 14px; font-size: 13px; color: var(--text-3); }
+
+/* app mock */
+.mock { margin: 56px auto 0; max-width: 1040px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--panel); box-shadow: 0 30px 80px -20px rgba(20,20,40,.35), 0 0 0 1px var(--border); overflow: hidden; text-align: left; }
+.mock-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-2); }
+.dot { width: 11px; height: 11px; border-radius: 50%; background: var(--border-strong); }
+.mock-bar .search { margin-left: 16px; flex: 1; max-width: 360px; font-size: 12px; color: var(--text-3); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; background: var(--panel); }
+.mock-body { display: grid; grid-template-columns: 1fr; min-height: 380px; }
+@media (min-width: 820px) { .mock-body { grid-template-columns: 170px 1.15fr 1fr; } }
+.side { display: none; border-right: 1px solid var(--border); padding: 12px 8px; font-size: 13px; color: var(--text-2); }
+@media (min-width: 820px) { .side { display: block; } }
+.side div { padding: 6px 10px; border-radius: 6px; display: flex; justify-content: space-between; }
+.side .on { background: var(--accent-2); color: var(--accent); font-weight: 600; }
+.side small { color: var(--text-3); font-variant-numeric: tabular-nums; }
+.list { border-right: 1px solid var(--border); font-size: 13px; min-width: 0; }
+.list h4 { margin: 0; padding: 12px 14px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
+.pr { padding: 9px 14px; border-top: 1px solid var(--border); display: grid; gap: 3px; }
+.pr.sel { background: var(--hunk-bg); box-shadow: inset 3px 0 0 var(--accent); }
+.pr .t { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pr .m { color: var(--text-3); font-family: var(--mono); font-size: 11.5px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.tag { font-family: var(--sans); font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; }
+.tag.ok { background: var(--ok-bg); color: var(--ok); }
+.tag.warn { background: var(--warn-bg); color: var(--warn); }
+.tag.info { background: var(--info-bg); color: var(--info); }
+.detail { padding: 16px; font-size: 13px; display: none; min-width: 0; }
+@media (min-width: 820px) { .detail { display: block; } }
+.detail h5 { margin: 0 0 4px; font-size: 15px; }
+.detail .sub { color: var(--text-3); font-family: var(--mono); font-size: 11.5px; margin-bottom: 14px; }
+.chain { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--bg-2); }
+.chain-title { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); margin-bottom: 8px; }
+.why { margin-top: 12px; font-size: 12.5px; color: var(--text-2); }
+.why li { margin: 3px 0; }
+.ck-ok { color: var(--ok); } .ck-no { color: var(--warn); }
+
+/* sections */
+section { padding: 88px 0; }
+.kicker { font-size: 13px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h2 { font-size: clamp(28px, 4.2vw, 42px); line-height: 1.12; letter-spacing: -.025em; margin: 10px 0 14px; font-weight: 750; }
+.sec-lede { color: var(--text-2); font-size: 18px; max-width: 640px; margin: 0; }
+
+.pillars { display: grid; gap: 16px; grid-template-columns: 1fr; margin-top: 40px; }
+@media (min-width: 760px) { .pillars { grid-template-columns: repeat(3, 1fr); } }
+.pillar { padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
+.pillar .ic { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-2); color: var(--accent); margin-bottom: 14px; }
+.pillar h3 { margin: 0 0 6px; font-size: 17px; }
+.pillar p { margin: 0; color: var(--text-2); font-size: 15px; }
+
+.feature { display: grid; gap: 32px; align-items: center; grid-template-columns: 1fr; padding: 44px 0; border-top: 1px solid var(--border); }
+@media (min-width: 880px) { .feature { grid-template-columns: 1fr 1.1fr; gap: 56px; } .feature.flip > :first-child { order: 2; } }
+.feature h3 { font-size: 26px; letter-spacing: -.02em; margin: 6px 0 10px; line-height: 1.2; }
+.feature p { color: var(--text-2); margin: 0 0 14px; }
+.feature ul { margin: 0; padding: 0; list-style: none; color: var(--text-2); font-size: 15px; }
+.feature li { padding-left: 22px; position: relative; margin: 6px 0; }
+.feature li::before { content: ""; position: absolute; left: 2px; top: .62em; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); transform: rotate(45deg); }
+.panel { border: 1px solid var(--border); border-radius: 14px; background: var(--panel); padding: 18px; box-shadow: 0 16px 40px -24px rgba(20,20,40,.35); min-width: 0; overflow: hidden; }
+code, .mono { font-family: var(--mono); font-size: .9em; }
+
+/* timeline mock */
+.tl { font-size: 12px; }
+.tl-axis { display: grid; grid-template-columns: 96px 1fr; color: var(--text-3); font-family: var(--mono); font-size: 10.5px; margin-bottom: 6px; }
+.tl-axis span { display: flex; justify-content: space-between; }
+.tl-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; height: 34px; border-top: 1px solid var(--border); }
+.tl-row b { font-weight: 600; font-family: var(--mono); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.track { position: relative; height: 100%; }
+.track::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; height: 2px; background: var(--border-strong); }
+.c { position: absolute; top: 50%; width: 8px; height: 8px; margin: -4px 0 0 -4px; border-radius: 50%; background: var(--text-3); }
+.pin { position: absolute; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-2); }
+.prm { position: absolute; top: 50%; width: 12px; height: 12px; margin: -6px 0 0 -6px; border: 2px dashed var(--info); border-radius: 3px; background: var(--panel); }
+.handle { position: absolute; top: 4px; bottom: -6px; width: 2px; background: var(--accent); }
+.handle::after { content: "v2.1"; position: absolute; top: -18px; left: -14px; font-size: 10px; font-weight: 700; color: var(--on-accent); background: var(--accent); padding: 0 6px; border-radius: 4px; }
+
+/* diff mock */
+.diff { font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.diff .h { background: var(--hunk-bg); color: var(--text-3); padding: 4px 10px; }
+.diff .r { display: grid; grid-template-columns: 6px 34px 1fr; white-space: pre; overflow: hidden; }
+.diff .r span:nth-child(2) { color: var(--text-3); text-align: right; padding-right: 10px; }
+.diff .add { background: var(--add-bg); } .diff .del { background: var(--del-bg); }
+.rail-done { background: var(--ok); } .rail-flag { background: var(--warn); } .rail-new { background: var(--border); }
+.rev-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; font-size: 13px; gap: 10px; flex-wrap: wrap; }
+.bar { height: 6px; border-radius: 99px; background: var(--bg-2); overflow: hidden; flex: 1; min-width: 100px; max-width: 220px; }
+.bar i { display: block; height: 100%; width: 64%; background: linear-gradient(90deg, var(--ok), var(--accent)); }
+
+/* grid of small features */
+.grid { display: grid; gap: 1px; grid-template-columns: 1fr; background: var(--border); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; margin-top: 40px; }
+@media (min-width: 640px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 960px) { .grid { grid-template-columns: repeat(3, 1fr); } }
+.cell { background: var(--panel); padding: 24px; }
+.cell h4 { margin: 0 0 6px; font-size: 16px; }
+.cell p { margin: 0; color: var(--text-2); font-size: 14.5px; }
+
+/* privacy */
+.privacy { background: var(--bg-2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.priv-grid { display: grid; gap: 28px; grid-template-columns: 1fr; margin-top: 36px; }
+@media (min-width: 760px) { .priv-grid { grid-template-columns: repeat(2, 1fr); } }
+.priv-grid h4 { margin: 0 0 4px; font-size: 16px; display: flex; gap: 10px; align-items: center; }
+.priv-grid p { margin: 0; color: var(--text-2); font-size: 15px; }
+
+/* cta */
+.final { text-align: center; }
+.final .panel { padding: 56px 24px; background: radial-gradient(500px 220px at 50% 0%, var(--glow), transparent 70%), var(--panel); }
+pre.cmd { display: inline-block; text-align: left; margin: 26px 0 0; padding: 14px 18px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; max-width: 100%; overflow-x: auto; }
+pre.cmd .p { color: var(--text-3); user-select: none; }
+
+footer { padding: 36px 0 48px; color: var(--text-3); font-size: 14px; }
+footer .wrap { display: flex; gap: 16px; justify-content: space-between; flex-wrap: wrap; align-items: center; }
+footer nav { all: unset; display: flex; gap: 18px; }
+footer a { text-decoration: none; } footer a:hover { color: var(--text); }
+.theme-btn { background: none; border: 1px solid var(--border); color: var(--text-2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
+</style>
+</head>
+<body>
+
+<nav aria-label="Primary">
+  <div class="wrap">
+    <a class="brand" href="#"><img src="icon.svg" alt="">Nonlinear</a>
+    <div class="navlinks">
+      <a href="#features">Features</a>
+      <a href="#privacy">Privacy</a>
+      <a href="#more">Everything else</a>
+      <a href="https://github.com/jimfangx/Nonlinear">GitHub</a>
+    </div>
+    <a class="btn btn-primary btn-sm nav-cta" href="https://github.com/jimfangx/Nonlinear/releases">Download</a>
+  </div>
+</nav>
+
+<main>
+<header class="hero">
+  <div class="wrap">
+    <span class="eyebrow"><b>New</b> Desktop app for macOS · Claude Code &amp; Codex adapters</span>
+    <h1>Ship releases that span <em>dozens of repos</em>.</h1>
+    <p class="lede">Nonlinear is the release workbench for maintainers whose work doesn't fit in one repository. Triage PRs, untangle cross-repo dependency chains, pin submodules and review huge diffs, all in one place.</p>
+    <div class="ctas">
+      <a class="btn btn-primary" href="https://github.com/jimfangx/Nonlinear/releases">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16.37 12.6c-.02-2.2 1.8-3.26 1.88-3.31-1.03-1.5-2.62-1.7-3.18-1.73-1.35-.14-2.64.8-3.33.8-.69 0-1.74-.78-2.87-.76-1.47.02-2.83.86-3.59 2.18-1.53 2.66-.39 6.6 1.1 8.76.73 1.06 1.6 2.24 2.73 2.2 1.1-.05 1.51-.71 2.84-.71 1.32 0 1.7.71 2.86.69 1.18-.02 1.93-1.07 2.65-2.13.84-1.22 1.18-2.41 1.2-2.47-.03-.01-2.3-.88-2.32-3.5zM14.2 6.13c.6-.74 1.01-1.75.9-2.77-.87.04-1.93.58-2.55 1.31-.56.64-1.05 1.68-.92 2.67.97.08 1.97-.49 2.57-1.21z"/></svg>
+        Download for macOS
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/jimfangx/Nonlinear">View on GitHub</a>
+    </div>
+    <p class="fine">Free and open source · MIT · No GitHub App to install</p>
+
+    <div class="mock" role="img" aria-label="Screenshot-style mockup of the Nonlinear inbox showing a dependency chain">
+      <div class="mock-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="search">⌘K  Jump to PR, repo, release…</span></div>
+      <div class="mock-body">
+        <div class="side">
+          <div class="on">Inbox <small>14</small></div>
+          <div>Timeline</div>
+          <div>Releases <small>2</small></div>
+          <div>Board</div>
+          <div>Review <small>5</small></div>
+          <div>Diff viewer</div>
+          <div>Git graph</div>
+          <div>Settings</div>
+        </div>
+        <div class="list">
+          <h4>Needs my review</h4>
+          <div class="pr sel"><span class="t">Bump rocket-chip to 1.6 + fix TLB widths</span><span class="m">chipyard#2041 <span class="tag warn">blocked by 2</span></span></div>
+          <div class="pr"><span class="t">Add Sv48 page walker support</span><span class="m">rocket-chip#3512 <span class="tag ok">approved</span></span></div>
+          <div class="pr"><span class="t">Regenerate FireSim bridges for new IO</span><span class="m">firesim#1709 <span class="tag info">CI running</span></span></div>
+          <h4>Release v2.1</h4>
+          <div class="pr"><span class="t">Gemmini: tile size config cleanup</span><span class="m">gemmini#418 <span class="tag ok">ready</span></span></div>
+          <div class="pr"><span class="t">Constellation NoC routing fix</span><span class="m">constellation#97 <span class="tag ok">ready</span></span></div>
+        </div>
+        <div class="detail">
+          <h5>Bump rocket-chip to 1.6 + fix TLB widths</h5>
+          <div class="sub">ucb-bar/chipyard#2041 · ↳ 2 new commits since you looked</div>
+          <div class="chain">
+            <div class="chain-title">Dependency chain</div>
+            <svg viewBox="0 0 300 120" width="100%" aria-hidden="true" style="display:block">
+              <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 10 5 0 10z" fill="var(--text-3)"/></marker></defs>
+              <path d="M88 30 C120 30 120 60 150 60" stroke="var(--text-3)" stroke-width="1.5" fill="none" marker-end="url(#ah)"/>
+              <path d="M88 92 C120 92 120 62 150 62" stroke="var(--text-3)" stroke-width="1.5" fill="none" marker-end="url(#ah)"/>
+              <rect x="4" y="16" width="84" height="28" rx="7" fill="var(--ok-bg)" stroke="var(--ok)"/>
+              <text x="46" y="34" text-anchor="middle" font-size="10.5" font-family="JetBrains Mono, monospace" fill="var(--ok)">rocket#3512</text>
+              <rect x="4" y="78" width="84" height="28" rx="7" fill="var(--warn-bg)" stroke="var(--warn)"/>
+              <text x="46" y="96" text-anchor="middle" font-size="10.5" font-family="JetBrains Mono, monospace" fill="var(--warn)">firesim#1709</text>
+              <rect x="152" y="47" width="100" height="28" rx="7" fill="var(--accent-2)" stroke="var(--accent)" stroke-width="1.5"/>
+              <text x="202" y="65" text-anchor="middle" font-size="10.5" font-weight="600" font-family="JetBrains Mono, monospace" fill="var(--accent)">chipyard#2041</text>
+            </svg>
+          </div>
+          <ul class="why">
+            <li><span class="ck-ok">✓</span> rocket-chip#3512 approved, mergeable</li>
+            <li><span class="ck-no">●</span> firesim#1709 waiting on CI</li>
+            <li><span class="ck-no">●</span> gitlink still points at <span class="mono">a3f91c2</span></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section style="padding-top:56px">
+  <div class="wrap">
+    <span class="kicker">Why Nonlinear</span>
+    <h2>Multi-repo releases are a graph,<br>not a list.</h2>
+    <p class="sec-lede">GitHub shows you one repository at a time. Your release depends on twelve of them, nested three submodules deep. Nonlinear is built for how that work actually fits together.</p>
+    <div class="pillars">
+      <div class="pillar">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z"/></svg></div>
+        <h3>No GitHub App</h3>
+        <p>Nothing is installed into anyone's org. You sign in with your own account, and GitHub stays the source of truth for PRs, reviews and permissions.</p>
+      </div>
+      <div class="pillar">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg></div>
+        <h3>Local-first</h3>
+        <p>Notes, review progress, release plans and cards live on your devices. It works offline, and sync is end-to-end encrypted.</p>
+      </div>
+      <div class="pillar">
+        <div class="ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M8.5 6.5C13 7 13 11 15.5 12M8.5 17.5C13 17 13 13 15.5 12"/></svg></div>
+        <h3>Submodule-native</h3>
+        <p>Gitlinks, nested pins and cross-repo dependencies are built into the app, not bolted on afterwards. It was designed around the Chipyard ecosystem.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features" style="padding-top:24px">
+  <div class="wrap">
+
+    <div class="feature">
+      <div>
+        <span class="kicker">Dependency chains</span>
+        <h3>Know exactly why a PR isn't ready to merge.</h3>
+        <p>Write <code>Depends-On: org/repo#123</code> in a PR body, or draw the chain yourself. Nonlinear builds the graph across repositories and gives you the reasons something is blocked, instead of a red X.</p>
+        <ul>
+          <li>Cycles are rejected, with an explanation of where they come from</li>
+          <li>A managed chain block is kept in sync in every member PR</li>
+          <li>Every write is previewed, so nothing reaches GitHub without your OK</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <div class="diff">
+          <div class="h">PR body · managed block preview</div>
+          <div class="r"><i></i><span>12</span><span>## Summary</span></div>
+          <div class="r"><i></i><span>13</span><span>Bumps rocket-chip and fixes TLB widths.</span></div>
+          <div class="r add"><i></i><span>14</span><span>&lt;!-- nonlinear:chain:start v1 --&gt;</span></div>
+          <div class="r add"><i></i><span>15</span><span>**Chain** (2 of 3 ready)</span></div>
+          <div class="r add"><i></i><span>16</span><span>- [x] ucb-bar/rocket-chip#3512</span></div>
+          <div class="r add"><i></i><span>17</span><span>- [ ] firesim/firesim#1709</span></div>
+          <div class="r add"><i></i><span>18</span><span>- [ ] **ucb-bar/chipyard#2041** ← this PR</span></div>
+          <div class="r add"><i></i><span>19</span><span>&lt;!-- nonlinear:chain:end --&gt;</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="feature flip">
+      <div>
+        <span class="kicker">Timeline &amp; releases</span>
+        <h3>Pin every submodule from one screen.</h3>
+        <p>Each submodule gets a row on a shared calendar, showing commits, tags, branch tips and open PRs. Drag a release handle across all of them, line everything up to a date, and catch nested inconsistencies before your users find them.</p>
+        <ul>
+          <li>Freeze a release and set criteria for it</li>
+          <li>Export a manifest or patch, or open a draft gitlink-bump PR</li>
+          <li>Split view with a shared crosshair for child timelines</li>
+        </ul>
+      </div>
+      <div class="panel tl" aria-hidden="true">
+        <div class="tl-axis"><span></span><span><i>Sep</i><i>Oct</i><i>Nov</i><i>Dec</i></span></div>
+        <div class="tl-row"><b>chipyard</b><div class="track"><i class="c" style="left:8%"></i><i class="c" style="left:24%"></i><i class="c" style="left:41%"></i><i class="pin" style="left:62%"></i><i class="prm" style="left:84%"></i><i class="handle" style="left:62%"></i></div></div>
+        <div class="tl-row"><b>rocket-chip</b><div class="track"><i class="c" style="left:14%"></i><i class="c" style="left:30%"></i><i class="pin" style="left:55%"></i><i class="c" style="left:70%"></i><i class="prm" style="left:90%"></i></div></div>
+        <div class="tl-row"><b>firesim</b><div class="track"><i class="c" style="left:5%"></i><i class="pin" style="left:47%"></i><i class="c" style="left:66%"></i><i class="c" style="left:78%"></i></div></div>
+        <div class="tl-row"><b>gemmini</b><div class="track"><i class="c" style="left:20%"></i><i class="c" style="left:36%"></i><i class="pin" style="left:59%"></i></div></div>
+        <div class="tl-row"><b>constellation</b><div class="track"><i class="c" style="left:11%"></i><i class="pin" style="left:52%"></i><i class="prm" style="left:73%"></i></div></div>
+      </div>
+    </div>
+
+    <div class="feature">
+      <div>
+        <span class="kicker">Review</span>
+        <h3>Review 4,000-line diffs without losing your place.</h3>
+        <p>A frontier rail tracks which hunks you've actually read. When the author force-pushes, your progress follows each hunk to its new position, and only the hunks that changed are marked stale.</p>
+        <ul>
+          <li>Flags, private notes, and draft comments posted as one GitHub review</li>
+          <li>Go-to-definition and find-references through any LSP server</li>
+          <li>Step through a chain in order and expand submodule changes inline</li>
+        </ul>
+      </div>
+      <div class="panel">
+        <div class="rev-head"><b class="mono">src/main/scala/rocket/TLB.scala</b><div class="bar"><i></i></div><span style="color:var(--text-3)">64% reviewed</span></div>
+        <div class="diff">
+          <div class="h">@@ -212,7 +212,9 @@ class TLB(instruction: Boolean …</div>
+          <div class="r"><i class="rail-done"></i><span>212</span><span>  val vpn = io.req.bits.vaddr(vaddrBits-1, pgIdxBits)</span></div>
+          <div class="r del"><i class="rail-done"></i><span>213</span><span>- val ppnWidth = 20</span></div>
+          <div class="r add"><i class="rail-done"></i><span>213</span><span>+ val ppnWidth = paddrBits - pgIdxBits</span></div>
+          <div class="r add"><i class="rail-flag"></i><span>214</span><span>+ require(ppnWidth &lt;= 44, "PPN too wide")</span></div>
+          <div class="r"><i class="rail-new"></i><span>215</span><span>  val sectored = Reg(Vec(nSectors, …))</span></div>
+          <div class="r"><i class="rail-new"></i><span>216</span><span>  val superpage = Reg(Vec(nSuper, …))</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section id="more" style="padding-top:24px">
+  <div class="wrap">
+    <span class="kicker">And everything else</span>
+    <h2>The rest of the workbench.</h2>
+    <div class="grid">
+      <div class="cell"><h4>📥 Smart inbox</h4><p>Categories you can edit, release lenses, pin and snooze, and a summary of what changed since you last looked.</p></div>
+      <div class="cell"><h4>🗂 Kanban board</h4><p>Cards link PRs, releases and checklists. The same card can sit in different places on different boards, and the keyboard works everywhere.</p></div>
+      <div class="cell"><h4>📦 Multi-repo diff viewer</h4><p>A 51 MB, 3,500-file JSON diff is indexed in about 280 ms and reopens instantly offline.</p></div>
+      <div class="cell"><h4>🌿 Git graph</h4><p>A lane graph that reads from the GitHub API, your working tree, a partial mirror, or a remote machine over SSH.</p></div>
+      <div class="cell"><h4>✨ AI summaries, on your terms</h4><p>Use your own API key or a local Claude Code or Codex CLI. You see every prompt first, and a hard budget cap stops spending.</p></div>
+      <div class="cell"><h4>♿ Accessible</h4><p>Automated audits report zero WCAG 2.2 AA violations, in both light and dark themes.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="privacy" class="privacy">
+  <div class="wrap">
+    <span class="kicker">Privacy &amp; security</span>
+    <h2>Your notes never leave your devices unencrypted.</h2>
+    <p class="sec-lede">Nonlinear is designed so that we couldn't read your data even if we wanted to.</p>
+    <div class="priv-grid">
+      <div><h4>🔐 End-to-end-encrypted sync</h4><p>Data is encrypted with AES-GCM before it's uploaded. New devices pair by approval with a matching 6-digit code, or with a recovery key.</p></div>
+      <div><h4>🪪 Minimal GitHub scope</h4><p>OAuth only asks for <code>public_repo</code>, and over-scoped tokens are refused. In the browser, your token never reaches the page.</p></div>
+      <div><h4>✋ Nothing sent without you</h4><p>Chain blocks, labels, reviews and PRs are all previewed and need your confirmation. If you're offline, writes wait in a queue until you approve them.</p></div>
+      <div><h4>🏠 Self-hostable</h4><p>The sync service is a single Cloudflare Worker backed by D1. You can deploy your own in about five commands.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="final">
+  <div class="wrap">
+    <div class="panel">
+      <h2>Spend less time on release day.</h2>
+      <p class="sec-lede" style="margin:0 auto 28px">Download the macOS app, or build the web app from source.</p>
+      <div class="ctas">
+        <a class="btn btn-primary" href="https://github.com/jimfangx/Nonlinear/releases">Download for macOS</a>
+        <a class="btn btn-ghost" href="https://github.com/jimfangx/Nonlinear#development">Build from source</a>
+      </div>
+      <pre class="cmd"><span class="p">$ </span>git clone https://github.com/jimfangx/Nonlinear
+<span class="p">$ </span>cd Nonlinear &amp;&amp; npm install &amp;&amp; npm run dev</pre>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="#"><img src="icon.svg" alt="" style="width:22px;height:22px">Nonlinear</a>
+    <nav aria-label="Footer">
+      <a href="https://github.com/jimfangx/Nonlinear">GitHub</a>
+      <a href="https://github.com/jimfangx/Nonlinear/releases">Releases</a>
+      <a href="https://github.com/jimfangx/Nonlinear/blob/main/LICENSE">MIT License</a>
+    </nav>
+    <button class="theme-btn" id="theme" type="button">Toggle theme</button>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement, key = "nl-site-theme";
+  try { var s = localStorage.getItem(key); if (s) root.dataset.theme = s; } catch (e) {}
+  document.getElementById("theme").addEventListener("click", function () {
+    var dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem(key, root.dataset.theme); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { emptyFileState, setFrontier, flagRange, fileStatus, markReviewed, remapFileState, rowSignatures, relocateAnchor, progress, subtract, union } from "../src/review/intervals";
+import { emptyFileState, setFrontier, flagRange, fileStatus, markAllReviewed, markReviewed, resetFile, unflagRange, remapFileState, rowSignatures, relocateAnchor, progress, subtract, union } from "../src/review/intervals";
 import { parseFileHunks } from "../src/diff/unified";
 import { expandUp, expandDown, breadcrumbs } from "../src/review/semantic";
 
@@ -19,6 +19,24 @@ describe("intervals", () => {
     expect(progress(s)).toBeCloseTo(0.9);
     s = markReviewed(s, [10, 20]);
     expect(fileStatus(s)).toBe("complete");
+  });
+  it("toggles a whole-file review across flags and files without text changes", () => {
+    const flagged = flagRange(emptyFileState("changes.scala", 10), [2, 3]);
+    for (const file of [flagged, emptyFileState("binary.png", 0)]) {
+      const reviewed = markAllReviewed(file);
+      expect(progress(reviewed)).toBe(1);
+      expect(fileStatus(reviewed)).toBe("complete");
+      expect(fileStatus(resetFile(reviewed))).toBe("not-started");
+    }
+  });
+  it("rewinds frontier marks while keeping flags clearable independently", () => {
+    const file = flagRange(markReviewed(emptyFileState("changes.scala", 10), [4, 7]), [6, 7]);
+    const forward = setFrontier(file, 5);
+    const rewound = setFrontier(forward, 4);
+    expect(rewound.frontier).toBe(4);
+    expect(rewound.flagged).toEqual([[6, 7]]);
+    expect(rewound.reviewed).toEqual([]);
+    expect(unflagRange(rewound, [6, 7]).flagged).toEqual([]);
   });
   it("frontier absorbs adjacent reviewed ranges", () => {
     let s = markReviewed(emptyFileState("a", 10), [3, 6]);

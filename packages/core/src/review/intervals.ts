@@ -98,9 +98,10 @@ export function setFrontier(s: FileReviewState, row: number): FileReviewState {
   // Moving the frontier past stale rows re-reviews them; flagged holes remain.
   const stale = subtract(s.stale, [[0, frontier]]);
   // Absorb reviewed ranges adjacent to the frontier to keep it contiguous.
+  const reviewed = frontier < s.frontier ? subtract(s.reviewed, [[frontier, s.frontier]]) : s.reviewed;
   let f = frontier;
-  for (const [a, b] of normalize(s.reviewed)) if (a <= f && b > f) f = b;
-  return { ...s, frontier: f, stale, updatedAt: Date.now() };
+  for (const [a, b] of normalize(reviewed)) if (a <= f && b > f) f = b;
+  return { ...s, frontier: f, reviewed, stale, updatedAt: Date.now() };
 }
 
 export function markReviewed(s: FileReviewState, iv: Interval): FileReviewState {
@@ -116,7 +117,7 @@ export function unflagRange(s: FileReviewState, iv: Interval): FileReviewState {
 }
 
 export function markAllReviewed(s: FileReviewState): FileReviewState {
-  return { ...s, frontier: s.totalRows, reviewed: [], stale: [], postponed: false, updatedAt: Date.now() };
+  return { ...s, frontier: Math.max(1, s.totalRows), reviewed: [], flagged: [], stale: [], postponed: false, updatedAt: Date.now() };
 }
 
 export function resetFile(s: FileReviewState): FileReviewState {

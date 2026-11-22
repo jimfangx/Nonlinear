@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { PRSnapshot, EdgeSyncStatus } from "@nonlinear/core";
 import { useApp } from "../lib/store";
 
@@ -9,12 +9,16 @@ export function Split({
   vertical = false,
   initial = 0.35,
   min = 0.12,
+  showSecond = true,
+  className = "",
   children,
 }: {
   id: string;
   vertical?: boolean;
   initial?: number;
   min?: number;
+  showSecond?: boolean;
+  className?: string;
   children: [ReactNode, ReactNode];
 }) {
   const saved = useApp((s) => (s.settings.main?.layout?.[`split:${id}`] as number | undefined) ?? initial);
@@ -57,12 +61,13 @@ export function Split({
     }
   };
   return (
-    <div ref={ref} className={`split ${vertical ? "vertical" : ""}`}>
-      <div className="pane" style={{ flexBasis: `${ratio * 100}%`, flexGrow: 0, flexShrink: 0 }}>
+    <div ref={ref} className={`split ${vertical ? "vertical" : ""} ${className}`}>
+      <div className="pane" style={{ flexBasis: showSecond ? `${ratio * 100}%` : "100%", flexGrow: 0, flexShrink: 0 }}>
         {children[0]}
       </div>
       <div
         className="splitter"
+        hidden={!showSecond}
         role="separator"
         aria-orientation={vertical ? "horizontal" : "vertical"}
         aria-valuenow={Math.round(ratio * 100)}
@@ -70,7 +75,7 @@ export function Split({
         onPointerDown={onDown}
         onKeyDown={onKey}
       />
-      <div className="pane" style={{ flex: 1 }}>
+      <div className="pane" style={{ flex: 1 }} hidden={!showSecond}>
         {children[1]}
       </div>
     </div>
@@ -79,18 +84,62 @@ export function Split({
 
 /* ---------------- Modal ---------------- */
 
-export function Modal({ title, onClose, children, footer, wide }: { title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
+export function useOverlayPresence(open: boolean): boolean {
+  const [exiting, setExiting] = useState(open);
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    if (open) {
+      setExiting(true);
+      return;
+    }
+    if (!exiting) return;
+    const timer = window.setTimeout(() => setExiting(false), window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? 0 : 150);
+    return () => window.clearTimeout(timer);
+  }, [open, exiting]);
+  return open || exiting;
+}
+
+export function Modal({ title, onClose, children, footer, wide, open: openProp }: { open?: boolean; title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
+  const open = openProp ?? true;
+  const titleId = useId();
+  const [closing, setClosing] = useState(false);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const overlay = useRef<HTMLDivElement>(null);
+  const present = useOverlayPresence(open);
+  const dismiss = () => {
+    if (!open || closing) return;
+    if (openProp !== undefined || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) onClose();
+    else setClosing(true);
+  };
+  useEffect(() => {
+    if (!open || !closing) return;
+    const timer = window.setTimeout(() => {
+      onCloseRef.current();
+      setClosing(false);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [open, closing]);
+  useEffect(() => {
+    if (!open) return;
+    const previous = document.activeElement;
+    overlay.current?.querySelector<HTMLElement>("[aria-label=Close]")?.focus();
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus(); };
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const k = (e: KeyboardEvent) => {
+      if (!e.defaultPrevented && e.key === "Escape" && [...document.querySelectorAll(".overlay")].filter((element) => !element.closest("[inert]")).at(-1) === overlay.current) dismiss();
+    };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+  }, [onClose, open, closing]);
+  if (!present) return null;
   return (
-    <div className="overlay" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal" role="dialog" aria-modal="true" style={wide ? { width: "min(960px, 94vw)" } : undefined}>
+    <div ref={overlay} className="overlay" data-closing={(!open || closing) || undefined} inert={!open || closing} onMouseDown={(e) => e.target === e.currentTarget && dismiss()}>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} style={wide ? { width: "min(960px, 94vw)" } : undefined}>
         <div className="head">
-          <span className="grow">{title}</span>
-          <button className="btn ghost sm" onClick={onClose} aria-label="Close">
+          <span className="grow" id={titleId}>{title}</span>
+          <button className="btn ghost sm" onClick={dismiss} aria-label="Close">
             ✕
           </button>
         </div>

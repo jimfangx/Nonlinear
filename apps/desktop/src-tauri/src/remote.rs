@@ -127,6 +127,22 @@ pub fn codegraph_local(repo: &Path, sub: &str, symbol: &str) -> Result<String, G
     })
 }
 
+pub fn codegraph_lineage(repo: &Path, direction: &str, symbol: &str, file: &str) -> Result<serde_json::Value, GitError> {
+    if !matches!(direction, "callees" | "impact") || symbol.is_empty() || symbol.len() > 128
+        || !symbol.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(GitError("invalid CodeGraph query".into()));
+    }
+    crate::git::validate_relpath(file)?;
+    if !repo.join(".codegraph").is_dir() {
+        return Err(GitError("CodeGraph has no index for this working tree".into()));
+    }
+    let mut command = Command::new("codegraph");
+    command.current_dir(repo).args([direction, "--json", "--file", file, "--", symbol]);
+    let output = run_bounded(command, Duration::from_secs(30))?;
+    serde_json::from_str(&output).map_err(|error| GitError(format!("invalid CodeGraph output: {error}")))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

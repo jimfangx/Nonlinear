@@ -174,6 +174,10 @@ export const DEFAULT_KEYS: Record<string, string> = {
   chainPrev: "[",
   chainNext: "]",
   palette: "mod+k",
+  settings: "mod+,",
+  shortcuts: "mod+/",
+  historyBack: "mod+[",
+  historyForward: "mod+]",
 };
 
 export const DEFAULT_SETTINGS: Settings = {

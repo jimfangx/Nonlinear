@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   checkNestedConsistency,
   makeScale,
@@ -15,7 +15,7 @@ import {
   type Zoom,
 } from "@nonlinear/core";
 import { useApp, type TimelineView } from "../lib/store";
-import { loadRoot, rowsFor, loadRowHistory, loadRowPRs, pinOnBranch, gitlinksAt, type RootSnapshot, type SubmoduleRow } from "../lib/timeline";
+import { loadRoot, rowsFor, loadRowHistory, rowPRs, usesGitTransport, pinOnBranch, gitlinksAt, type RootSnapshot, type SubmoduleRow } from "../lib/timeline";
 import { describeError } from "../lib/github";
 import { availableSources, childSource, sourceLabel, type Source } from "../lib/sources";
 import { Modal } from "../components/ui";
@@ -23,23 +23,36 @@ import { Modal } from "../components/ui";
 export function TimelineWorkspace() {
   const { id } = useParams();
   const timelines = useApp((s) => s.timelines);
-  const [creating, setCreating] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const creating = params.has("new");
+  const closeCreate = () => setParams({}, { replace: true });
   const nav = useNavigate();
   const tl = id ? timelines[id] : undefined;
   const [splitWith, setSplitWith] = useState<string | null>(null);
   const [zoom, setZoom] = useState<Zoom>(tl?.zoom ?? "week");
-  const [crossX, setCrossX] = useState<number | null>(null);
-  const [scrollX, setScrollX] = useState(0);
+  const [years, setYears] = useState(2);
+  const historyStart = useMemo(() => {
+    const start = new Date();
+    start.setUTCFullYear(start.getUTCFullYear() - years);
+    start.setUTCHours(0, 0, 0, 0);
+    return +start;
+  }, [years]);
+  const [scrollDate, setScrollDate] = useState<number | null>(null);
   const [scales, setScales] = useState<Record<string, TimeScale>>({});
   const [focusChild, setFocusChild] = useState<{ repo: string; sha: string | null } | null>(null);
 
-  useEffect(() => setSplitWith(null), [id]);
+  useEffect(() => {
+    setSplitWith(null);
+    setYears(2);
+    setScrollDate(null);
+    setZoom(tl?.zoom ?? "week");
+  }, [id]);
 
   if (!tl) {
     return (
       <div className="page">
         <h1 className="h1">Submodule Timelines</h1>
-        <p className="muted">Track a root repository and baseline ref; one row per submodule in .gitmodules at the selected root commit. Releases are drawn as draggable segmented lines; nothing is written to GitHub until you apply a release explicitly.</p>
+        <p className="muted">Track the commits and release pins of a root repository’s submodules.</p>
         <div className="panel">
           {Object.values(timelines).map((t) => (
             <div key={t.id} className="list-row" onClick={() => nav(`/timeline/${t.id}`)}>
@@ -51,17 +64,14 @@ export function TimelineWorkspace() {
           ))}
           {!Object.keys(timelines).length && <div className="empty">No timelines yet.</div>}
         </div>
-        <button className="btn primary" style={{ marginTop: 12 }} onClick={() => setCreating(true)}>
-          + New timeline
-        </button>
-        {creating && <CreateTimeline onClose={() => setCreating(false)} />}
+        {creating && <CreateTimeline onClose={closeCreate} />}
       </div>
     );
   }
 
   // Union scale so both panes share calendar alignment (§3.3).
   const union: TimeScale | null = (() => {
-    const ss = Object.values(scales);
+    const ss = [scales[tl.id], splitWith ? scales[splitWith] : undefined].filter((s): s is TimeScale => !!s);
     if (!ss.length) return null;
     return { start: Math.min(...ss.map((s) => s.start)), end: Math.max(...ss.map((s) => s.end)), pxPerDay: ss[0]!.pxPerDay };
   })();
@@ -70,13 +80,17 @@ export function TimelineWorkspace() {
 
   return (
     <div className="col" style={{ height: "100%", gap: 0 }}>
-      <div className="toolbar">
-        <h1 className="toolbar-title">{tl.name}</h1>
-        <span className="faint small">
-          {tl.root}@{tl.baseRef}
-          {tl.rootSha ? ` (${tl.rootSha.slice(0, 8)})` : ""}
-        </span>
-        <span className="spacer" />
+      <div className="col" style={{ flex: 1, minHeight: 0, gap: 0 }}>
+        <div style={{ flex: 1, minHeight: 0, borderBottom: splitWith ? "2px solid var(--border-strong)" : undefined }}>
+          <TimelinePane
+            tl={tl}
+            zoom={zoom}
+            union={union}
+            onScale={(s) => setScales((x) => (x[tl.id]?.start === s.start && x[tl.id]?.end === s.end && x[tl.id]?.pxPerDay === s.pxPerDay ? x : { ...x, [tl.id]: s }))}
+            historyStart={historyStart}
+            loadEarlier={() => { setScrollDate(historyStart); setYears((value) => value + 2); }}
+            synchronize={!!splitWith}
+            controls={<>
         <label className="small row">
           Zoom
           <select className="input" value={zoom} onChange={(e) => { setZoom(e.target.value as Zoom); useApp.getState().patch("timelines", tl.id, { zoom: e.target.value as Zoom }); }}>
@@ -93,21 +107,9 @@ export function TimelineWorkspace() {
             </option>
           ))}
         </select>
-        <button className="btn sm" onClick={() => setCreating(true)}>
-          + New
-        </button>
-      </div>
-      <div className="col" style={{ flex: 1, minHeight: 0, gap: 0 }}>
-        <div style={{ flex: 1, minHeight: 0, borderBottom: splitWith ? "2px solid var(--border-strong)" : undefined }}>
-          <TimelinePane
-            tl={tl}
-            zoom={zoom}
-            union={union}
-            onScale={(s) => setScales((x) => (x[tl.id]?.start === s.start && x[tl.id]?.end === s.end && x[tl.id]?.pxPerDay === s.pxPerDay ? x : { ...x, [tl.id]: s }))}
-            crossX={crossX}
-            setCrossX={setCrossX}
-            scrollX={scrollX}
-            setScrollX={setScrollX}
+            </>}
+            scrollDate={scrollDate}
+            setScrollDate={setScrollDate}
             highlightChild={focusChild}
             onOpenChild={(row) => {
               const existing = Object.values(timelines).find((t) => t.root === row.childKey);
@@ -129,10 +131,11 @@ export function TimelineWorkspace() {
               zoom={zoom}
               union={union}
               onScale={(s) => setScales((x) => (x[splitWith]?.start === s.start && x[splitWith]?.end === s.end && x[splitWith]?.pxPerDay === s.pxPerDay ? x : { ...x, [splitWith]: s }))}
-              crossX={crossX}
-              setCrossX={setCrossX}
-              scrollX={scrollX}
-              setScrollX={setScrollX}
+              historyStart={historyStart}
+              loadEarlier={() => { setScrollDate(historyStart); setYears((value) => value + 2); }}
+              synchronize
+              scrollDate={scrollDate}
+              setScrollDate={setScrollDate}
               parent={tl}
               onSelectPin={(repo, sha) => setFocusChild({ repo, sha })}
               onOpenChild={() => undefined}
@@ -140,7 +143,7 @@ export function TimelineWorkspace() {
           </div>
         )}
       </div>
-      {creating && <CreateTimeline onClose={() => setCreating(false)} />}
+      {creating && <CreateTimeline onClose={closeCreate} />}
     </div>
   );
 }
@@ -187,31 +190,40 @@ function CreateTimeline({ onClose }: { onClose: () => void }) {
   );
 }
 
-const ROW_H = 36;
-const LABEL_W = 260;
+const ROW_H = 52;
+const LABEL_W = 310;
 
 interface PaneProps {
   tl: TimelineView;
   zoom: Zoom;
   union: TimeScale | null;
   onScale: (s: TimeScale) => void;
-  crossX: number | null;
-  setCrossX: (x: number | null) => void;
-  scrollX: number;
-  setScrollX: (x: number) => void;
+  historyStart: number;
+  loadEarlier: () => void;
+  synchronize: boolean;
+  controls?: React.ReactNode;
+  scrollDate: number | null;
+  setScrollDate: (date: number) => void;
   parent?: TimelineView;
   highlightChild?: { repo: string; sha: string | null } | null;
   onSelectPin?: (repo: string, sha: string) => void;
   onOpenChild: (row: SubmoduleRow) => void;
 }
 
-function TimelinePane({ tl, zoom, union, onScale, crossX, setCrossX, scrollX, setScrollX, parent, highlightChild, onSelectPin, onOpenChild }: PaneProps) {
+function TimelinePane({ tl, zoom, union, onScale, historyStart, loadEarlier, synchronize, controls, scrollDate, setScrollDate, parent, highlightChild, onSelectPin, onOpenChild }: PaneProps) {
   const [snap, setSnap] = useState<RootSnapshot | null>(null);
   const [rows, setRows] = useState<SubmoduleRow[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [alignDate, setAlignDate] = useState("");
   const [suggest, setSuggest] = useState<Map<string, CommitNode>>(new Map());
-  const [hover, setHover] = useState<{ c: CommitNode; x: number; y: number; row: string } | null>(null);
+  const [popup, setPopup] = useState<CommitPopup | null>(null);
+  const [windowLeft, setWindowLeft] = useState(0);
+  const [windowTop, setWindowTop] = useState(0);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const publishScroll = useRef(0);
+  const crosshair = useRef<SVGLineElement>(null);
+  const source = tl.source?.kind === "github" ? { kind: "github" as const } : tl.source ?? { kind: "github" as const };
+  const hideHover = () => setPopup((current) => current?.locked ? current : null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const releases = useApp((s) => s.releases);
   const pins = useApp((s) => s.pins);
@@ -220,55 +232,91 @@ function TimelinePane({ tl, zoom, union, onScale, crossX, setCrossX, scrollX, se
   const [visibleReleases, setVisibleReleases] = useState<Set<string>>(() => new Set(Object.values(releases).filter((r) => r.state !== "archived").map((r) => r.id)));
   const [activeRelease, setActiveRelease] = useState<string | null>(Object.values(releases).find((r) => r.state === "draft")?.id ?? null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const programmaticScroll = useRef<number | null>(null);
+  const manualDate = useRef<number | null>(null);
+  const appliedDate = useRef<number | null>(null);
+  const [viewport, setViewport] = useState({ width: 0, height: 0 });
+  const viewportWidth = viewport.width;
 
   useEffect(() => {
     let cancelled = false;
     setErr(null);
     setSnap(null);
-    const src = tl.source ?? { kind: "github" as const };
-    loadRoot(tl.root, tl.baseRef, tl.rootSha, src)
-      .then(async (s) => {
+    setRows([]);
+    setPopup(null);
+    manualDate.current = null;
+    appliedDate.current = null;
+    void loadRoot(tl.root, tl.baseRef, tl.rootSha, source)
+      .then((snapshot) => { if (!cancelled) setSnap(snapshot); })
+      .catch((error) => { if (!cancelled) setErr(describeError(error)); });
+    return () => { cancelled = true; cancelAnimationFrame(publishScroll.current); };
+  }, [tl.root, tl.baseRef, tl.rootSha, JSON.stringify(source)]);
+
+  useEffect(() => {
+    if (!snap) return;
+    let cancelled = false;
+    const base = rowsFor(snap).filter((row) => !tl.visiblePaths || tl.visiblePaths.includes(row.entry.path));
+    setRows((existing) => base.map((row) => existing.find((old) => old.entry.path === row.entry.path && old.pinned === row.pinned) ?? row));
+    setLoadingHistory(true);
+    let next = 0;
+    const since = new Date(historyStart).toISOString().slice(0, 10);
+    void Promise.all(Array.from({ length: 4 }, async () => {
+      while (!cancelled && next < base.length) {
+        const row = base[next++]!;
+        if (row.status !== "loading") continue;
+        const loaded = await loadRowHistory(row, { sinceDays: 730, since, rootRef: tl.baseRef }, source)
+          .catch((error): SubmoduleRow => ({ ...row, status: "private-or-missing", error: describeError(error) }));
         if (cancelled) return;
-        setSnap(s);
-        const base = rowsFor(s);
-        setRows(base);
-        // Load child histories with bounded concurrency.
-        const out = [...base];
-        let i = 0;
-        await Promise.all(
-          Array.from({ length: 4 }, async () => {
-            while (i < out.length) {
-              const k = i++;
-              if (out[k]!.status !== "loading") continue;
-              out[k] = await loadRowHistory(out[k]!, { sinceDays: zoom === "month" ? 365 : zoom === "week" ? 120 : 30 }, src);
-              out[k] = { ...out[k]!, prs: await loadRowPRs(out[k]!, Object.values(useApp.getState().prs)).catch(() => []) };
-              if (!cancelled) setRows([...out]);
-            }
-          }),
-        );
-      })
-      .catch((e) => !cancelled && setErr(describeError(e)));
-    return () => {
-      cancelled = true;
-    };
-  }, [tl.root, tl.baseRef, tl.rootSha, JSON.stringify(tl.source ?? null)]);
+        const prs = await rowPRs(loaded, Object.values(useApp.getState().prs), source.kind === "github" && !usesGitTransport(source)).catch(() => []);
+        if (!cancelled) setRows((previous) => previous.map((item) => item.entry.path === loaded.entry.path ? { ...loaded, prs } : item));
+      }
+    })).finally(() => { if (!cancelled) setLoadingHistory(false); });
+    return () => { cancelled = true; };
+  }, [snap, historyStart, tl.visiblePaths]);
 
   const ownScale = useMemo(() => {
-    const dates: string[] = [];
-    for (const r of rows) for (const c of r.history ?? []) dates.push(c.committedAt);
-    if (snap) dates.push(snap.commit.committedAt);
-    return makeScale(dates, zoom);
-  }, [rows, snap, zoom]);
+    const end = Math.max(
+      Date.now(),
+      snap ? Date.parse(snap.commit.committedAt) || 0 : 0,
+      ...Object.values(pins).filter((pin) => pin.parentRepo === tl.root).map((pin) => Date.parse(pin.committedAt ?? "") || 0),
+    );
+    return { ...makeScale([end], zoom), start: historyStart };
+  }, [historyStart, snap, zoom, pins, tl.root]);
   useEffect(() => onScale(ownScale), [ownScale]);
   const scale = union ? { ...union, pxPerDay: ownScale.pxPerDay } : ownScale;
-  const width = scaleWidth(scale);
-  const tks = useMemo(() => ticks(scale, zoom), [scale, zoom]);
+  const width = Math.max(scaleWidth(scale), viewportWidth - LABEL_W);
+  const windowStart = Math.max(0, windowLeft - 384);
+  const windowEnd = windowLeft + viewportWidth + 384;
+  const firstRow = Math.max(0, Math.floor((windowTop - 4 * ROW_H - 42) / ROW_H));
+  const lastRow = Math.ceil((windowTop + viewport.height + 6 * ROW_H) / ROW_H);
+  const tks = useMemo(() => ticks(scale, zoom), [scale.start, scale.end, scale.pxPerDay, zoom]);
 
-  // synchronized horizontal scroll
-  useEffect(() => {
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const measure = () => setViewport({ width: element.clientWidth, height: element.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [snap]);
+
+  // Keep the calendar date at the left edge as additional history loads or zoom changes.
+  useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (el && Math.abs(el.scrollLeft - scrollX) > 1) el.scrollLeft = scrollX;
-  }, [scrollX]);
+    if (!el) return;
+    const max = Math.max(0, el.scrollWidth - el.clientWidth);
+    const externalJump = scrollDate !== appliedDate.current;
+    const date = externalJump ? scrollDate : manualDate.current ?? scrollDate;
+    appliedDate.current = scrollDate;
+    const offset = date === null ? max : Math.min(max, Math.max(0, xOf(scale, date)));
+    if (Math.abs(el.scrollLeft - offset) > 1) {
+      el.scrollLeft = offset;
+      programmaticScroll.current = el.scrollLeft;
+      if (date !== null) manualDate.current = scale.start + el.scrollLeft / scale.pxPerDay * 864e5;
+      setWindowLeft(Math.floor(el.scrollLeft / 192) * 192);
+    }
+  }, [scrollDate, scale.start, scale.pxPerDay, width, snap, viewportWidth]);
 
   const pinFor = (relId: string, path: string): ReleasePin | undefined => pins[pinKey({ releaseId: relId, parentRepo: tl.root, pathChain: [...tl.pathPrefix, path] })];
 
@@ -323,8 +371,7 @@ function TimelinePane({ tl, zoom, union, onScale, crossX, setCrossX, scrollX, se
   };
 
   const doAlign = () => {
-    if (!alignDate) return setSuggest(new Map());
-    const iso = new Date(alignDate + "T23:59:59Z").toISOString();
+    const iso = alignDate ? new Date(alignDate + "T23:59:59Z").toISOString() : new Date().toISOString();
     const m = new Map<string, CommitNode>();
     for (const r of rows) {
       if (!r.index || !r.tip) continue;
@@ -342,20 +389,19 @@ function TimelinePane({ tl, zoom, union, onScale, crossX, setCrossX, scrollX, se
   return (
     <div className="col" style={{ height: "100%", gap: 0 }}>
       <div className="toolbar small">
-        <b>{tl.root}</b>
-        <span className="mono faint" title={snap.commit.message}>
-          @{snap.commit.sha.slice(0, 8)} · {new Date(snap.commit.committedAt).toLocaleDateString()}
-        </span>
-        <span className="faint">{rows.length} submodules</span>
+        <h1 className="toolbar-title tl-heading" title={snap.commit.message}>
+          {tl.root}@{tl.baseRef} <span className="mono faint">@{snap.commit.sha.slice(0, 8)} · {new Date(snap.commit.committedAt).toLocaleDateString()} · {rows.length} submodules</span>
+        </h1>
+        {controls}
         <select
           className="input"
           aria-label="Data source"
-          value={JSON.stringify(tl.source ?? { kind: "github" })}
+          value={JSON.stringify(source)}
           onChange={(e) => useApp.getState().patch("timelines", tl.id, { source: JSON.parse(e.target.value) as Source })}
         >
           {availableSources(tl.root).map((s) => (
             <option key={JSON.stringify(s)} value={JSON.stringify(s)}>
-              {sourceLabel(s)}
+              {s.kind === "github" ? "GitHub" : sourceLabel(s)}
             </option>
           ))}
         </select>
@@ -376,10 +422,14 @@ function TimelinePane({ tl, zoom, union, onScale, crossX, setCrossX, scrollX, se
             </option>
           ))}
         </select>
-        <input type="date" className="input" value={alignDate} onChange={(e) => setAlignDate(e.target.value)} aria-label="Align to date" />
-        <button className="btn sm" onClick={doAlign} title="Suggest latest reachable commit ≤ date (does not change pins)">
-          Align to date
-        </button>
+        <div className="tl-date">
+          <label className="row small">Date <input type="date" className="input" value={alignDate} onChange={(e) => setAlignDate(e.target.value)} aria-label="Timeline date" min={new Date(historyStart).toISOString().slice(0, 10)} max={new Date(scale.end).toISOString().slice(0, 10)} /></label>
+          <button className="btn" disabled={!alignDate} title="Go to selected date" aria-label="Go to selected date" onClick={() => {
+            const time = Date.parse(alignDate);
+            if (Number.isFinite(time)) setScrollDate(time - Math.max(0, viewportWidth - LABEL_W) / 2 / scale.pxPerDay * 864e5);
+          }}>→</button>
+        </div>
+        <button className="btn sm" onClick={doAlign} title="Suggest the latest commit at or before the selected date">Latest</button>
         {suggest.size > 0 && activeRelease && (
           <button
             className="btn sm primary"
@@ -410,32 +460,60 @@ function TimelinePane({ tl, zoom, union, onScale, crossX, setCrossX, scrollX, se
         ref={scrollRef}
         className="tl"
         style={{ overflow: "auto", flex: 1 }}
-        onScroll={(e) => setScrollX((e.target as HTMLDivElement).scrollLeft)}
-        onMouseLeave={() => setCrossX(null)}
+        onClick={(e) => { if (e.target instanceof Element && !e.target.closest(".tl-commit, .tl-pin-marker, .tl-pr-marker")) setPopup(null); }}
+        onScroll={(e) => {
+          const el = e.currentTarget;
+          const left = Math.max(0, el.scrollLeft);
+          setWindowLeft(Math.floor(left / 192) * 192);
+          setWindowTop(Math.floor(el.scrollTop / (ROW_H * 3)) * ROW_H * 3);
+          const ignored = programmaticScroll.current;
+          programmaticScroll.current = null;
+          if (ignored !== null && Math.abs(left - ignored) <= 1) return;
+          const date = scale.start + left / scale.pxPerDay * 864e5;
+          manualDate.current = date;
+          if (!synchronize) return;
+          cancelAnimationFrame(publishScroll.current);
+          publishScroll.current = requestAnimationFrame(() => setScrollDate(date));
+        }}
+        onMouseLeave={() => { crosshair.current?.setAttribute("visibility", "hidden"); hideHover(); }}
       >
         <div className="tl-axis" style={{ width: LABEL_W + width }}>
-          <div className="tl-label" style={{ height: 28 }}>
+          <div className="tl-label" style={{ height: 42, width: LABEL_W }}>
             <span className="faint small">submodule / pin</span>
           </div>
-          <div className="tl-canvas" style={{ width, height: 28 }}>
-            {tks.map((t, i) => (
-              <span key={i} className="faint small" style={{ position: "absolute", left: t.x + 2, top: 6, whiteSpace: "nowrap" }}>
+          <div className="tl-canvas" style={{ width, height: 42 }}>
+            {snap && <span className="tl-baseline" style={{ left: xOf(scale, snap.commit.committedAt) }}
+              title={`${tl.root}@${tl.baseRef} · ${snap.commit.sha.slice(0, 8)}`}>{tl.root.split("/").at(-1)}@{tl.baseRef}</span>}
+            {windowStart === 0 && <button className="btn sm tl-load-earlier" disabled={loadingHistory} onClick={loadEarlier}>
+              {loadingHistory ? "Loading history…" : "← Load earlier history"}
+            </button>}
+            {tks.filter((tick) => tick.x >= windowStart && tick.x <= windowEnd).map((t, i) => (
+              <span key={i} className="faint small" style={{ position: "absolute", left: t.x + 2, top: 23, whiteSpace: "nowrap" }}>
                 {t.label}
               </span>
             ))}
           </div>
         </div>
-        <div style={{ position: "relative", width: LABEL_W + width }} onMouseMove={(e) => {
+        <div className="tl-track" style={{ position: "relative", width: LABEL_W + width, height: rows.length * ROW_H }} onMouseMove={(e) => {
           const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
           const x = e.clientX - rect.left - LABEL_W;
-          setCrossX(x >= 0 ? x : null);
+          const overLabel = e.target instanceof Element && e.target.closest(".tl-label");
+          const line = crosshair.current;
+          if (line) {
+            line.setAttribute("visibility", !overLabel && x >= 0 && x <= width ? "visible" : "hidden");
+            line.setAttribute("x1", String(x));
+            line.setAttribute("x2", String(x));
+          }
         }}>
-          {rows.map((r, ri) => (
+          {rows.slice(firstRow, lastRow).map((r, index) => (
+            <div key={r.entry.path} style={{ position: "absolute", width: "100%", top: (firstRow + index) * ROW_H }}>
             <TimelineRow
-              key={r.entry.path}
               row={r}
               scale={scale}
               width={width}
+              windowStart={windowStart}
+              windowEnd={windowEnd}
+              rootSha={snap.commit.sha}
               tl={tl}
               releases={visibleRels}
               pinFor={pinFor}
@@ -443,11 +521,16 @@ function TimelinePane({ tl, zoom, union, onScale, crossX, setCrossX, scrollX, se
               onSetPin={setPin}
               onClearPin={(rel) => remove("pins", pinKey({ releaseId: rel.id, parentRepo: tl.root, pathChain: [...tl.pathPrefix, r.entry.path] }))}
               suggestion={suggest.get(r.entry.path)}
-              onHover={(c, x) => setHover(c ? { c, x, y: ri * ROW_H, row: r.entry.path } : null)}
+              showPopup={(commit, target, locked, pr) => {
+                const bounds = target.getBoundingClientRect();
+                setPopup((current) => current?.locked && !locked ? current : { commit, repo: r.childKey, pr, locked, x: bounds.left, y: bounds.bottom });
+              }}
+              hideHover={hideHover}
               onOpenChild={() => onOpenChild(r)}
               highlighted={!!highlightChild && highlightChild.repo === r.childKey}
               onSelectPin={onSelectPin}
             />
+            </div>
           ))}
           {/* Release segmented lines + right-side anchors (§3.2) */}
           <svg style={{ position: "absolute", left: LABEL_W, top: 0, pointerEvents: "none" }} width={width} height={rows.length * ROW_H}>
@@ -467,30 +550,51 @@ function TimelinePane({ tl, zoom, union, onScale, crossX, setCrossX, scrollX, se
                 </g>
               );
             })}
-            {crossX !== null && <line x1={crossX} x2={crossX} y1={0} y2={rows.length * ROW_H} stroke="var(--text-3)" strokeDasharray="3 3" />}
+            {snap && <line x1={xOf(scale, snap.commit.committedAt)} x2={xOf(scale, snap.commit.committedAt)}
+              y1={0} y2={rows.length * ROW_H} stroke="var(--info)" strokeDasharray="5 4" opacity={0.8} />}
+            <line ref={crosshair} visibility="hidden" y1={0} y2={rows.length * ROW_H} stroke="var(--text-3)" strokeDasharray="3 3" />
           </svg>
           {visibleRels.map((rel, i) => (
             <div key={rel.id} style={{ position: "absolute", right: 4 + i * 18, top: -24, width: 14, height: 14, borderRadius: 3, background: rel.color }} title={`${rel.name} anchor`} />
           ))}
-          {hover && (
-            <div className="panel pad small" style={{ position: "absolute", left: LABEL_W + hover.x + 10, top: hover.y + ROW_H, zIndex: 10, maxWidth: 360, pointerEvents: "none" }}>
-              <div className="mono">{hover.c.sha.slice(0, 12)}</div>
-              <div>{hover.c.message.split("\n")[0]}</div>
-              <div className="faint">
-                {hover.c.author} · {new Date(hover.c.committedAt).toLocaleString()}
-              </div>
-            </div>
-          )}
         </div>
       </div>
+      {popup && <div className={`panel pad small tl-popup ${popup.locked ? "locked" : ""}`}
+        style={{ left: Math.max(4, Math.min(popup.x, window.innerWidth - 325)), top: Math.max(4, Math.min(popup.y + 8, window.innerHeight - 130)) }}
+        role={popup.locked ? "dialog" : undefined} aria-label="Commit details">
+        <div className="row">
+          {popup.repo ? <a className="mono" href={`https://github.com/${popup.repo}/commit/${popup.commit.sha}`} target="_blank" rel="noreferrer">#{popup.commit.sha.slice(0, 8)}</a> : <span className="mono">{popup.commit.sha.slice(0, 8)}</span>}
+          {popup.pr && popup.repo && <a href={`https://github.com/${popup.repo}/pull/${popup.pr}`} target="_blank" rel="noreferrer">PR #{popup.pr}</a>}
+          {popup.locked && <button className="btn ghost sm tl-popup-close" aria-label="Close commit details" onClick={() => setPopup(null)}>✕</button>}
+        </div>
+        <div>{popup.commit.message.split("\n")[0]}</div>
+        <div className="faint">{popup.commit.author} · {new Date(popup.commit.committedAt).toLocaleString()}</div>
+      </div>}
+
     </div>
   );
 }
+
+function lowerBound(points: { x: number }[], x: number): number {
+  let first = 0;
+  let last = points.length;
+  while (first < last) {
+    const middle = Math.floor((first + last) / 2);
+    if (points[middle]!.x < x) first = middle + 1;
+    else last = middle;
+  }
+  return first;
+}
+
+type CommitPopup = { commit: CommitNode; repo: string | null; pr?: number; locked: boolean; x: number; y: number };
 
 function TimelineRow({
   row,
   scale,
   width,
+  windowStart,
+  windowEnd,
+  rootSha,
   tl,
   releases,
   pinFor,
@@ -498,7 +602,8 @@ function TimelineRow({
   onSetPin,
   onClearPin,
   suggestion,
-  onHover,
+  showPopup,
+  hideHover,
   onOpenChild,
   highlighted,
   onSelectPin,
@@ -506,6 +611,9 @@ function TimelineRow({
   row: SubmoduleRow;
   scale: TimeScale;
   width: number;
+  windowStart: number;
+  windowEnd: number;
+  rootSha: string;
   tl: TimelineView;
   releases: Release[];
   pinFor: (relId: string, path: string) => ReleasePin | undefined;
@@ -513,13 +621,20 @@ function TimelineRow({
   onSetPin: (rel: Release, row: SubmoduleRow, c: CommitNode) => void;
   onClearPin: (rel: Release) => void;
   suggestion?: CommitNode;
-  onHover: (c: CommitNode | null, x: number) => void;
+  showPopup: (commit: CommitNode, target: HTMLElement, locked: boolean, pr?: number) => void;
+  hideHover: () => void;
   onOpenChild: () => void;
   highlighted: boolean;
   onSelectPin?: (repo: string, sha: string) => void;
 }) {
-  const hist = useMemo(() => [...(row.history ?? [])].sort((a, b) => a.committedAt.localeCompare(b.committedAt)), [row.history]);
-  const onBranch = pinOnBranch(row);
+  const hist = useMemo(() => [...(row.history ?? [])].filter((commit) => Number.isFinite(Date.parse(commit.committedAt))).sort((a, b) => Date.parse(a.committedAt) - Date.parse(b.committedAt)), [row.history]);
+  const onBranch = useMemo(() => pinOnBranch(row), [row]);
+  const start = scale.start;
+  const pxPerDay = scale.pxPerDay;
+  const plotted = useMemo(() => hist.map((commit) => ({ commit, x: (Date.parse(commit.committedAt) - start) / 864e5 * pxPerDay })), [hist, start, pxPerDay]);
+  const from = lowerBound(plotted, windowStart);
+  const to = lowerBound(plotted, windowEnd);
+  const branchCommits = useMemo(() => new Set(row.tip ? row.index?.reachable(row.tip.sha, row.index.bySha.size).map((commit) => commit.sha) : []), [row.index, row.tip]);
   const canvasRef = useRef<HTMLDivElement>(null);
 
   const nearest = useCallback(
@@ -565,20 +680,21 @@ function TimelineRow({
   };
 
   return (
-    <div className="tl-row" style={{ background: highlighted ? "var(--accent-2)" : undefined }}>
+    <div className="tl-row" style={{ height: ROW_H, background: highlighted ? "var(--accent-2)" : undefined }}>
       <div className="tl-label" style={{ width: LABEL_W }}>
         <div className="row" style={{ gap: 4 }}>
-          <b className="ellipsis grow mono small" title={row.entry.path}>
+          <a className="tl-path ellipsis grow mono small" title={row.entry.path} href={`https://github.com/${tl.root}/tree/${rootSha}/${row.entry.path.split("/").map(encodeURIComponent).join("/")}`} target="_blank" rel="noreferrer">
             {row.entry.path}
-          </b>
+          </a>
           {row.childKey && (
             <button className="btn ghost sm" style={{ height: 18 }} onClick={onOpenChild} title="Open child timeline">
               ↳
             </button>
           )}
         </div>
-        <div className="faint small ellipsis">
-          {row.childKey ?? row.entry.url ?? "?"} · <span className="mono">{row.pinned?.slice(0, 8) ?? "—"}</span>
+        <div className="tl-meta faint small">
+          {row.childKey ? <a className="ellipsis" title={row.childKey} href={`https://github.com/${row.childKey}`} target="_blank" rel="noreferrer">{row.childKey}</a> : <span className="ellipsis">{row.entry.url || "?"}</span>}
+          {row.childKey && row.pinned ? <a className="mono" href={`https://github.com/${row.childKey}/commit/${row.pinned}`} target="_blank" rel="noreferrer">{row.pinned.slice(0, 8)}</a> : <span className="mono">{row.pinned?.slice(0, 8) ?? "—"}</span>}
           {row.status === "unresolved" && <span className="chip warn" style={{ marginLeft: 4 }}>unresolved</span>}
           {row.status === "private-or-missing" && <span className="chip err" style={{ marginLeft: 4 }} title={row.error}>unavailable</span>}
           {onBranch === false && <span className="chip warn" style={{ marginLeft: 4 }} title={`Pinned commit is not on ${row.branch}`}>diverged</span>}
@@ -593,17 +709,14 @@ function TimelineRow({
         <div style={{ position: "absolute", left: 0, right: 0, top: ROW_H / 2, height: 1, background: "var(--border)" }} />
         {row.status === "loading" && <span className="faint small" style={{ position: "absolute", left: 8, top: 10 }}>loading history…</span>}
         {row.error && row.status !== "ok" && <span className="faint small" style={{ position: "absolute", left: 8, top: 10 }}>{row.error}</span>}
-        {hist.map((c) => {
-          const x = xOf(scale, c.committedAt);
-          const onBr = row.tip && row.index ? row.index.isAncestor(c.sha, row.tip.sha) : true;
-          return (
-            <div
-              key={c.sha}
-              onMouseEnter={() => onHover(c, x)}
-              onMouseLeave={() => onHover(null, 0)}
-              style={{ position: "absolute", left: x - 3, top: ROW_H / 2 - 3, width: 6, height: 6, borderRadius: "50%", background: onBr === false ? "transparent" : "var(--text-3)", border: onBr === false ? "1px solid var(--warn)" : undefined }}
-            />
-          );
+        {plotted.slice(from, to).map(({ commit, x }) => {
+          const onBr = !row.tip || branchCommits.has(commit.sha);
+          const pr = row.prs?.find((item) => item.head.sha === commit.sha)?.number;
+          return <button key={commit.sha} className={`tl-commit ${onBr ? "" : "off-branch"}`} style={{ left: x }}
+            aria-label={`Commit ${commit.sha.slice(0, 8)}`}
+            onMouseEnter={(e) => showPopup(commit, e.currentTarget, false, pr)} onMouseLeave={hideHover}
+            onClick={(e) => showPopup(commit, e.currentTarget, true, pr)}
+          />;
         })}
         {row.tags?.filter((t) => row.index?.bySha.has(t.sha)).map((t) => (
           <span key={t.name} className="ref tag" style={{ position: "absolute", left: xOf(scale, row.index!.bySha.get(t.sha)!.committedAt) + 4, top: 1 }}>
@@ -611,29 +724,35 @@ function TimelineRow({
           </span>
         ))}
         {row.prs?.map((p) => {
-          const onBranch = row.tip && row.index ? row.index.isAncestor(p.head.sha, row.tip.sha) : "unknown";
+          const onBranch = !row.tip || branchCommits.has(p.head.sha);
           return (
-            <a
+            <button
               key={p.key}
-              href={`#/pr/${p.key.replace("#", "/").replace(/^([^/]+)\/([^/]+)\//, "$1/$2/")}`}
-              className="ref"
+              className="ref tl-pr-marker"
               title={`${p.key} ${p.title}\nhead ${p.head.sha.slice(0, 8)} (${new Date(p.head.committedAt).toLocaleDateString()})${onBranch === false ? " — not on the tracked branch" : ""}`}
               style={{ position: "absolute", left: xOf(scale, p.head.committedAt) - 4, top: ROW_H - 15, zIndex: 2, background: "var(--info-bg)", border: `1px ${p.draft ? "dashed" : "solid"} var(--info)` }}
-              onMouseEnter={() => onHover(p.head, xOf(scale, p.head.committedAt))}
-              onMouseLeave={() => onHover(null, 0)}
+              onMouseEnter={(e) => showPopup(p.head, e.currentTarget, false, p.number)}
+              onClick={(e) => showPopup(p.head, e.currentTarget, true, p.number)}
+              onMouseLeave={hideHover}
             >
               PR #{p.number}
-            </a>
+</button>
           );
         })}
         {row.tip && <span className="ref" style={{ position: "absolute", left: xOf(scale, row.tip.committedAt) + 4, top: ROW_H - 16 }}>{row.branch}</span>}
         {row.pinnedCommit && (
-          <div
-            title={`Current gitlink ${row.pinned} (${new Date(row.pinnedCommit.committedAt).toLocaleDateString()})`}
-            onClick={() => row.childKey && onSelectPin?.(row.childKey, row.pinned!)}
-            onMouseEnter={() => onHover(row.pinnedCommit!, xOf(scale, row.pinnedCommit!.committedAt))}
-            onMouseLeave={() => onHover(null, 0)}
-            style={{ position: "absolute", left: xOf(scale, row.pinnedCommit.committedAt) - 7, top: ROW_H / 2 - 7, width: 14, height: 14, borderRadius: "50%", background: "var(--text)", border: "2px solid var(--panel)", cursor: "pointer", zIndex: 2 }}
+          <button
+            type="button"
+            aria-label={`Pinned commit ${row.pinned?.slice(0, 8)}`}
+            title={`${tl.root}@${tl.baseRef} pins ${row.pinned} (${new Date(row.pinnedCommit.committedAt).toLocaleDateString()})`}
+            onClick={(e) => {
+              showPopup(row.pinnedCommit!, e.currentTarget, true);
+              if (row.childKey && row.pinned) onSelectPin?.(row.childKey, row.pinned);
+            }}
+            onMouseEnter={(e) => showPopup(row.pinnedCommit!, e.currentTarget, false)}
+            onMouseLeave={hideHover}
+            className="tl-pin-marker"
+            style={{ left: xOf(scale, row.pinnedCommit.committedAt) }}
           />
         )}
         {suggestion && <div title={`Align-to-date suggestion ${suggestion.sha.slice(0, 8)}`} style={{ position: "absolute", left: xOf(scale, suggestion.committedAt) - 6, top: ROW_H / 2 - 6, width: 12, height: 12, borderRadius: 2, border: "2px dashed var(--accent)", zIndex: 2 }} />}

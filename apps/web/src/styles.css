@@ -613,3 +613,4 @@ html.has-bg .panel, html.has-bg .toolbar, html.has-bg .tabs { background: color-
 .symbol-code mark { background: var(--warn-bg); color: inherit; border-radius: 2px; }
 .symbol-row .chip { flex: none; }
 .review-file-list-head > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.cached-entry-status { padding: 4px 8px; }

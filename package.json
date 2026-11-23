@@ -1,7 +1,7 @@
 {
   "name": "nonlinear",
   "private": true,
-  "version": "0.1.14",
+  "version": "0.1.15",
   "description": "Nonlinear: local-first, GitHub-native release and code-review workspace (see design/)",
   "workspaces": [
     "packages/*",

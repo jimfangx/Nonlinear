@@ -29,7 +29,8 @@ import { invoke, isDesktop } from "./platform";
 export const DEFAULT_CLOUD_URL: string = (import.meta.env.VITE_NONLINEAR_CLOUD_URL as string | undefined) ?? "";
 
 export function cloudUrl(): string {
-  return useApp.getState().settings_().syncUrl || DEFAULT_CLOUD_URL;
+  // Tolerate a trailing slash or spaces left while the field is being edited.
+  return useApp.getState().settings_().syncUrl.trim().replace(/\/+$/, "") || DEFAULT_CLOUD_URL;
 }
 
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {

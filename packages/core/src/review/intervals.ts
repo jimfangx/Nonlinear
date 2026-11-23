@@ -292,6 +292,17 @@ export interface PRReviewProgress {
   updatedAt: number;
 }
 
+/**
+ * Share of a PR reviewed, 0–1: the average of each changed file's reviewed share.
+ * Files you haven't opened count as 0. `changedFiles` is the PR's file count from GitHub.
+ */
+export function prPercentReviewed(p: PRReviewProgress, changedFiles: number): number {
+  const fs = Object.values(p.files);
+  const total = Math.max(changedFiles, fs.length);
+  if (!total) return 0;
+  return Math.min(1, fs.reduce((sum, f) => sum + progress(f), 0) / total);
+}
+
 export function prProgress(p: PRReviewProgress): { complete: number; total: number; stale: number } {
   const fs = Object.values(p.files);
   return {

@@ -162,7 +162,7 @@ function GitHubSection() {
         <button
           className="btn sm"
           onClick={async () => {
-            if (s.apiBase.endsWith("/gh")) {
+            if (s.apiBase.trim().replace(/\/+$/, "").endsWith("/gh")) {
               await disconnect();
               toast("info", "Disconnected from Nonlinear Cloud and GitHub.");
               return;
@@ -190,7 +190,7 @@ function GitHubSection() {
       </div>
       <label className="row small">
         API base
-        <input className="input grow mono" aria-label="GitHub API base" value={s.apiBase} onChange={(e) => { set({ apiBase: e.target.value.replace(/\/$/, "") }); resetClient(); }} />
+        <input className="input grow mono" aria-label="GitHub API base" value={s.apiBase} onChange={(e) => { set({ apiBase: e.target.value }); resetClient(); }} onBlur={(e) => { set({ apiBase: e.target.value.trim().replace(/\/+$/, "") }); resetClient(); }} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
         <span className="faint">GitHub Enterprise: https://HOST/api/v3</span>
       </label>
       <div className="panel pad col">
@@ -563,7 +563,7 @@ function CloudSection() {
         <summary className="small faint">Advanced: self-hosted service</summary>
         <div className="row small" style={{ marginTop: 6 }}>
           Service URL
-          <input aria-label="Self-hosted service URL" className="input grow mono" placeholder={DEFAULT_CLOUD_URL || "https://nonlinear-sync.example.workers.dev"} value={s.syncUrl} onChange={(e) => set({ syncUrl: e.target.value.replace(/\/$/, "") })} disabled={state.kind !== "disconnected"} />
+          <input aria-label="Self-hosted service URL" className="input grow mono" placeholder={DEFAULT_CLOUD_URL || "https://nonlinear-sync.example.workers.dev"} value={s.syncUrl} onChange={(e) => set({ syncUrl: e.target.value })} onBlur={(e) => set({ syncUrl: e.target.value.trim().replace(/\/+$/, "") })} disabled={state.kind !== "disconnected"} spellCheck={false} autoCapitalize="off" autoCorrect="off" />
         </div>
         <div className="faint small">Deploy your own copy from <code>services/sync</code> (Cloudflare Workers + D1). Leave empty to use this build's default.</div>
       </details>

@@ -9,6 +9,7 @@ mod remote;
 mod review_mcp;
 pub use review_mcp::serve as serve_review_mcp;
 mod store;
+mod vault;
 
 use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -176,28 +177,15 @@ async fn git_grep(repo_path: String, word: String, max: usize) -> Res<Vec<git::G
 }
 
 /* ---------------- OS keychain (secrets never touch SQLite or sync) ---------------- */
-
-const SERVICE: &str = "dev.nonlinear.app";
+// All secrets live in one keychain item, read once per launch (see vault.rs).
 
 #[tauri::command]
 fn keychain_get(key: String) -> Res<Option<String>> {
-    let entry = keyring::Entry::new(SERVICE, &key).map_err(e)?;
-    match entry.get_password() {
-        Ok(p) => Ok(Some(p)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(x) => Err(e(x)),
-    }
+    vault::get(&key)
 }
 #[tauri::command]
 fn keychain_set(key: String, value: Option<String>) -> Res<()> {
-    let entry = keyring::Entry::new(SERVICE, &key).map_err(e)?;
-    match value {
-        Some(v) => entry.set_password(&v).map_err(e),
-        None => match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(x) => Err(e(x)),
-        },
-    }
+    vault::set(&key, value)
 }
 
 /* ---------------- Git ---------------- */

@@ -1,5 +1,5 @@
-import { CachedEntry } from "../components/CachedEntry";
-import { RepositoryShortcuts, useCachedRepositories } from "../components/RepositoryShortcuts";
+import { RepoEntry } from "../components/RepoEntry";
+import { RepositoryShortcuts, useCachedRepositories, repositoryFromInput } from "../components/RepositoryShortcuts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -36,8 +36,8 @@ export function GitGraph() {
   const key = owner && repo ? `${owner}/${repo}`.toLowerCase() : null;
   const [input, setInput] = useState(key ?? "");
   const openRepo = (value: string) => {
-    const repository = value.trim().toLowerCase();
-    if (/^[^/\s]+\/[^/\s]+$/.test(repository)) nav(`/graph/${repository}`);
+    const repository = repositoryFromInput(value);
+    if (repository) { setInput(repository); nav(`/graph/${repository}`); }
   };
   useEffect(() => { if (key) setInput(key); }, [key]);
 
@@ -45,8 +45,7 @@ export function GitGraph() {
     <div className="col" style={{ height: "100%", gap: 0 }}>
       <form className="toolbar graph-picker" onSubmit={(e) => { e.preventDefault(); openRepo(input); }}>
         <h1 className="toolbar-title">Git Graph</h1>
-        <CachedEntry value={input} onChange={setInput} onSelect={openRepo} options={repositories.map((value) => ({ value }))}
-          label="Repository" placeholder="owner/repo" />
+        <RepoEntry value={input} onChange={setInput} onSelect={openRepo} />
         <button type="submit" className="btn">Open</button>
         <RepositoryShortcuts current={key} repositories={repositories} onOpen={openRepo} />
       </form>

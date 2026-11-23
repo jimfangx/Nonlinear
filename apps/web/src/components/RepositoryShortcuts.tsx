@@ -1,5 +1,45 @@
 import { useEffect, useMemo, useRef } from "react";
+import { parseRepoKey } from "@nonlinear/core";
 import { useApp } from "../lib/store";
+import type { CachedOption } from "./CachedEntry";
+
+/** Remember that a repository was used (picker, PR page…): most recent first, with a visit count. */
+export function recordRepositoryVisit(repo: string): void {
+  const key = repo.toLowerCase();
+  const state = useApp.getState();
+  const saved = state.settings_().layout;
+  const history = (saved.graphRecent as string[] | undefined) ?? [];
+  if (history[0] === key) return;
+  const counts = (saved.graphVisits as Record<string, number> | undefined) ?? {};
+  state.setSettings({ layout: { ...saved, graphRecent: [key, ...history.filter((r) => r !== key)].slice(0, 12),
+    graphVisits: { ...counts, [key]: (counts[key] ?? 0) + 1 } } });
+}
+
+/** Repositories for a type-ahead: pinned, then recently used, then everything else the app knows about. */
+export function useRepositoryOptions(repositories: string[]): CachedOption[] {
+  const layout = useApp((state) => state.settings_().layout);
+  return useMemo(() => {
+    const pinned = (layout.graphPinned as string[] | undefined) ?? [];
+    const recent = (layout.graphRecent as string[] | undefined) ?? [];
+    const out: CachedOption[] = [];
+    const seen = new Set<string>();
+    const add = (value: string, detail?: string) => {
+      const v = value.toLowerCase();
+      if (!seen.has(v)) { seen.add(v); out.push({ value: v, detail }); }
+    };
+    pinned.forEach((r) => add(r, "pinned"));
+    recent.forEach((r) => add(r, "recent"));
+    repositories.forEach((r) => add(r));
+    return out;
+  }, [layout, repositories]);
+}
+
+/** "owner/repo" from typed text or a GitHub URL, lower-cased; null if it isn't one. */
+export function repositoryFromInput(text: string): string | null {
+  const t = text.trim().replace(/^https?:\/\/github\.com\//i, "").replace(/[?#].*$/, "").replace(/\/+$/, "");
+  const ref = parseRepoKey(t.split("/").slice(0, 2).join("/"));
+  return ref ? `${ref.owner}/${ref.repo}`.toLowerCase() : null;
+}
 
 export function useCachedRepositories(): string[] {
   const repositories = useApp((state) => state.repos);
@@ -28,12 +68,7 @@ export function RepositoryShortcuts({ current, repositories, onOpen }: {
   useEffect(() => {
     if (!current || current === previous.current) return;
     previous.current = current;
-    const state = useApp.getState();
-    const saved = state.settings_().layout;
-    const history = (saved.graphRecent as string[] | undefined) ?? [];
-    const counts = (saved.graphVisits as Record<string, number> | undefined) ?? {};
-    state.setSettings({ layout: { ...saved, graphRecent: [current, ...history.filter((repo) => repo !== current)].slice(0, 12),
-      graphVisits: { ...counts, [current]: (counts[current] ?? 0) + 1 } } });
+    recordRepositoryVisit(current);
   }, [current]);
 
   const ranked = [...new Set([...(current ? [current] : []), ...recent, ...repositories])].sort((a, b) => (visits[b] ?? 0) - (visits[a] ?? 0));

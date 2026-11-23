@@ -41,6 +41,7 @@ import {
   matchesByRow,
   countMatchesPerFile,
   identifierAt,
+  toSplitRows,
 } from "@nonlinear/core";
 import { useApp, useSettings, type DraftComment } from "../lib/store";
 import { fileSectionOf, loadInlineComments, fileState, saveFileState, gitlinkShas, type LoadedDiff } from "../lib/review";
@@ -285,8 +286,31 @@ function FilePane({ pr, diff, file, comments, layout, setLayout, mode, setMode, 
   const toast = useApp((s) => s.toast);
   const [selection, setSelection] = useState<Interval | null>(null);
   const [selectedSide, setSelectedSide] = useState<DiffSide>();
-  const selectionSide = mode === "split" ? selectedSide : undefined;
+  // Side-by-side: a selection covers whole rows (both sides) for review marks, notes and copying;
+  // a GitHub comment still goes on the side that was clicked, as on GitHub.
+  const selectionSide: DiffSide | undefined = undefined;
+  const commentSide = mode === "split" ? selectedSide : undefined;
   const allRows = useMemo(() => hunks.flatMap((h) => h.lines), [hunks]);
+  // Side-by-side rows pair lines that aren't adjacent in file order; map each line to the span of its row
+  // so a selection of rows covers both sides.
+  const splitSpan = useMemo(() => {
+    const span = new Map<number, [number, number]>();
+    let ri = 0;
+    for (const h of hunks) {
+      const index = new Map<DiffLine, number>();
+      for (const l of h.lines) index.set(l, ri++);
+      for (const row of toSplitRows(h)) {
+        const ris = [row.left, row.right].filter((l): l is DiffLine => !!l).map((l) => index.get(l)!);
+        if (!ris.length) continue;
+        const lo = Math.min(...ris);
+        const hi = Math.max(...ris);
+        for (const x of ris) span.set(x, [lo, hi]);
+      }
+    }
+    return span;
+  }, [hunks]);
+  const wholeRows = (iv: Interval): Interval => mode !== "split" ? iv
+    : [Math.min(iv[0], splitSpan.get(iv[0])?.[0] ?? iv[0]), Math.max(iv[1], (splitSpan.get(iv[1] - 1)?.[1] ?? iv[1] - 1) + 1)];
   const selectedLines = useMemo(() => selection
     ? allRows.slice(...selection).filter((line) => line.kind !== "meta" && onDiffSide(line, selectionSide))
     : [], [allRows, selection, selectionSide]);
@@ -605,12 +629,13 @@ function FilePane({ pr, diff, file, comments, layout, setLayout, mode, setMode, 
       put("notes", n.id, n);
       void signalReviewStart(pr);
     } else {
-      const last = selectedLines.at(-1) ?? anchorLine;
-      const first = selectedLines[0];
-      const side = selectionSide ?? (last?.kind === "del" ? "LEFT" : "RIGHT");
+      const commentLines = commentSide ? selectedLines.filter((l) => onDiffSide(l, commentSide)) : selectedLines;
+      const last = commentLines.at(-1) ?? anchorLine;
+      const first = commentLines[0];
+      const side = commentSide ?? (last?.kind === "del" ? "LEFT" : "RIGHT");
       const line = side === "LEFT" ? last?.oldNo : last?.newNo;
       const startLine = side === "LEFT" ? first?.oldNo : first?.newNo;
-      if (line == null || (selectedLines.length > 1 && (startLine == null || startLine >= line))) {
+      if (line == null || (commentLines.length > 1 && (startLine == null || startLine >= line))) {
         toast("warn", "Select a continuous range on one side of the diff for a GitHub comment.");
         return;
       }
@@ -762,7 +787,7 @@ function FilePane({ pr, diff, file, comments, layout, setLayout, mode, setMode, 
       {selection && (
         <div className="toolbar small selection-bar">
           <span>
-            Rows {selection[0] + 1}–{selection[1]} selected
+            Rows {selection[0] + 1}–{selection[1]} selected{commentSide && <span className="faint" title="Review marks, notes and copying cover both sides; a GitHub comment goes on the side you clicked."> · comments on the {commentSide === "LEFT" ? "old (left)" : "new (right)"} side</span>}
           </span>
           <button className="btn sm" onClick={() => changeSelection(markReviewed)}>
             r Mark reviewed
@@ -809,7 +834,7 @@ function FilePane({ pr, diff, file, comments, layout, setLayout, mode, setMode, 
               selectionSide={selectionSide}
               onSelect={(iv, a) => {
                 setSelectedSide(a.side);
-                setSelection(iv);
+                setSelection(wholeRows(iv));
                 setComposer(null);
                 setMenu(null);
                 setAnchorLine(a.line);
@@ -819,7 +844,7 @@ function FilePane({ pr, diff, file, comments, layout, setLayout, mode, setMode, 
                 e.preventDefault();
                 if (!selection || i < selection[0] || i >= selection[1] || (selectionSide && side !== selectionSide)) {
                   setSelectedSide(side);
-                  setSelection([i, i + 1]);
+                  setSelection(wholeRows([i, i + 1]));
                   setComposer(null);
                 }
                 setAnchorLine(line);

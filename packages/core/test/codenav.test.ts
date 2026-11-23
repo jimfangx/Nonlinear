@@ -115,3 +115,34 @@ describe("symbols", () => {
     expect(occ.map((o) => [o.line, o.kind, o.inCode])).toEqual([[0, "definition", true], [1, "reference", false], [1, "reference", false], [2, "reference", true]]);
   });
 });
+
+import { diffSnapshots, type PRSnapshot } from "../src";
+describe("PR activity times", () => {
+  const base = { key: "o/r#1", reviews: [], labels: [], requestedReviewers: [], commentsCount: 1, state: "open", draft: false, ci: "success", headSha: "a", updatedAt: "2026-11-20T10:00:00Z", mergedAt: null, reviewDecision: "unknown" } as unknown as PRSnapshot;
+  const seen = Date.parse("2026-11-22T12:00:00Z");
+  it("uses GitHub's time, not when Nonlinear noticed", () => {
+    const next = { ...base, commentsCount: 2, updatedAt: "2026-11-21T09:30:00Z" } as PRSnapshot;
+    const [e] = diffSnapshots(base, next, seen);
+    expect(e!.at).toBe(seen);
+    expect(e!.happenedAt).toBe(Date.parse("2026-11-21T09:30:00Z"));
+    expect(e!.approx).toBe(true);
+  });
+  it("uses the exact review submission time", () => {
+    const next = { ...base, reviews: [{ user: "amy", state: "APPROVED", submittedAt: "2026-11-21T08:00:00Z" }], updatedAt: "2026-11-21T09:30:00Z" } as PRSnapshot;
+    const e = diffSnapshots({ ...base, reviewDecision: "REVIEW_REQUIRED" } as PRSnapshot, next, seen).find((x) => x.kind === "review")!;
+    expect(e.happenedAt).toBe(Date.parse("2026-11-21T08:00:00Z"));
+    expect(e.approx).toBeUndefined();
+  });
+});
+
+import { prPercentReviewed, type PRReviewProgress, type FileReviewState } from "../src";
+describe("PR percent reviewed", () => {
+  const file = (path: string, totalRows: number, frontier: number): FileReviewState =>
+    ({ path, blobId: null, totalRows, frontier, reviewed: [], flagged: [], stale: [], postponed: false, updatedAt: 0 }) as unknown as FileReviewState;
+  const pr = (files: FileReviewState[]): PRReviewProgress => ({ prKey: "o/r#1", headSha: "h", baseSha: "b", phase: "reviewing", files: Object.fromEntries(files.map((f) => [f.path, f])), updatedAt: 0 } as unknown as PRReviewProgress);
+  it("averages files and counts unopened files as 0", () => {
+    expect(prPercentReviewed(pr([file("a", 10, 10), file("b", 10, 5)]), 2)).toBeCloseTo(0.75);
+    expect(prPercentReviewed(pr([file("a", 10, 10)]), 4)).toBeCloseTo(0.25);
+    expect(prPercentReviewed(pr([]), 0)).toBe(0);
+  });
+});

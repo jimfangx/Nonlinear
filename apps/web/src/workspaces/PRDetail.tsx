@@ -273,13 +273,22 @@ function RecentActivity({ prKey }: { prKey: string }) {
   if (!events?.length) return null;
   return (
     <section className="panel pad small">
-      <h3 className="h3">Recent activity (observed by Nonlinear)</h3>
-      {events.slice(0, 8).map((e, i) => (
-        <div key={i} className="row">
-          <span className="faint" style={{ width: 70 }}>{timeAgo(e.at)}</span>
-          <span>{e.text}</span>
-        </div>
-      ))}
+      <h3 className="h3">Recent activity</h3>
+      {events.slice(0, 8).map((e, i) => {
+        const when = e.happenedAt;
+        const title = when
+          ? `${e.approx ? "Around" : "At"} ${new Date(when).toLocaleString()} on GitHub${e.approx ? " (GitHub's last update to this PR)" : ""}. Nonlinear noticed it ${timeAgo(e.at)}.`
+          : `Nonlinear noticed this ${new Date(e.at).toLocaleString()}; GitHub didn't say exactly when it happened.`;
+        return (
+          <div key={i} className="row">
+            <span className="faint" style={{ width: 92, flex: "none" }} title={title}>
+              {when ? `${e.approx ? "~" : ""}${timeAgo(when)}` : `seen ${timeAgo(e.at)}`}
+            </span>
+            <span>{e.text}</span>
+          </div>
+        );
+      })}
+      <div className="faint small" style={{ marginTop: 4 }}>Changes Nonlinear noticed between refreshes. “~” means approximate: GitHub only reports when the PR was last updated.</div>
     </section>
   );
 }

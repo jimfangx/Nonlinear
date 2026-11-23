@@ -171,7 +171,12 @@ export function permissionFrom(p: { admin?: boolean; maintain?: boolean; push?: 
 /* ---------------- Recent-event summaries (§2.1) ---------------- */
 
 export interface PREvent {
+  /** when Nonlinear noticed the change (drives "new since you looked") */
   at: number;
+  /** when it happened on GitHub, as far as GitHub tells us */
+  happenedAt?: number;
+  /** happenedAt is the PR's last-update time, not the exact moment of this change */
+  approx?: boolean;
   kind: "commits" | "review" | "ci" | "state" | "comments" | "labels" | "ready" | "reviewers";
   text: string;
 }
@@ -179,7 +184,12 @@ export interface PREvent {
 /** Derive human-readable events by comparing two snapshots of the same PR. */
 export function diffSnapshots(prev: PRSnapshot | undefined, next: PRSnapshot, at = Date.now()): PREvent[] {
   if (!prev) return [];
-  const ev: PREvent[] = [];
+  const raw: PREvent[] = [];
+  const ev = { push: (e: PREvent) => raw.push(e) };
+  // GitHub's last-update time for the PR: the closest available time for most changes (never later than when we saw it).
+  const updated = Date.parse(next.updatedAt);
+  const approxTime = Number.isFinite(updated) ? Math.min(updated, at) : undefined;
+  const reviewTimes = new Map(next.reviews.map((r) => [r.user, r.submittedAt ? Date.parse(r.submittedAt) : NaN]));
   if (prev.headSha !== next.headSha) ev.push({ at, kind: "commits", text: `new commits (head ${next.headSha.slice(0, 7)})` });
   if (prev.state !== next.state) ev.push({ at, kind: "state", text: next.state === "merged" ? "merged" : next.state === "closed" ? "closed" : "reopened" });
   if (prev.draft && !next.draft) ev.push({ at, kind: "ready", text: "marked ready for review" });
@@ -187,7 +197,9 @@ export function diffSnapshots(prev: PRSnapshot | undefined, next: PRSnapshot, at
   const prevRev = new Map(prev.reviews.map((r) => [r.user, r.state]));
   for (const r of next.reviews) {
     if (prevRev.get(r.user) !== r.state && r.state !== "PENDING" && (prev.reviewDecision !== "unknown" || prev.reviews.length)) {
-      ev.push({ at, kind: "review", text: `${r.user} ${r.state === "APPROVED" ? "approved" : r.state === "CHANGES_REQUESTED" ? "requested changes" : r.state === "DISMISSED" ? "review dismissed" : "commented"}` });
+      const submitted = reviewTimes.get(r.user);
+      ev.push({ at, kind: "review", text: `${r.user} ${r.state === "APPROVED" ? "approved" : r.state === "CHANGES_REQUESTED" ? "requested changes" : r.state === "DISMISSED" ? "review dismissed" : "commented"}`,
+        ...(submitted !== undefined && Number.isFinite(submitted) ? { happenedAt: Math.min(submitted, at) } : {}) });
     }
   }
   if (next.commentsCount > prev.commentsCount) ev.push({ at, kind: "comments", text: `${next.commentsCount - prev.commentsCount} new comment${next.commentsCount - prev.commentsCount > 1 ? "s" : ""}` });
@@ -196,7 +208,11 @@ export function diffSnapshots(prev: PRSnapshot | undefined, next: PRSnapshot, at
   if (addedLabels.length || removedLabels.length) ev.push({ at, kind: "labels", text: [...addedLabels.map((l) => `+${l}`), ...removedLabels.map((l) => `−${l}`)].join(" ") });
   const newReq = next.requestedReviewers.filter((r) => !prev.requestedReviewers.includes(r));
   if (newReq.length) ev.push({ at, kind: "reviewers", text: `review requested from ${newReq.join(", ")}` });
-  return ev;
+  if (prev.state !== next.state && next.state === "merged" && next.mergedAt) {
+    const merged = raw.find((e) => e.kind === "state");
+    if (merged) merged.happenedAt = Math.min(Date.parse(next.mergedAt), at);
+  }
+  return raw.map((e) => (e.happenedAt !== undefined || approxTime === undefined ? e : { ...e, happenedAt: approxTime, approx: true }));
 }
 
 /** Short one-line summary of events not yet seen. */

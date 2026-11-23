@@ -91,11 +91,12 @@ export async function githubApi(): Promise<GitHubClient> {
   // Signed in through a sync server (OAuth): an optional personal access token covers organizations that block the OAuth app.
   const viaOAuth = s.authMode === "oauth";
   const fallback = viaOAuth ? ((await getSecret(FALLBACK_TOKEN_SECRET)) ?? null) : null;
-  if (!client || token !== clientToken || fallback !== clientFallback || client.baseUrl !== s.apiBase) {
+  const base = s.apiBase.trim().replace(/\/+$/, "") || DIRECT_API;
+  if (!client || token !== clientToken || fallback !== clientFallback || client.baseUrl !== base) {
     clientToken = token;
     clientFallback = fallback;
     const onRateLimit = (r: RateLimit) => useApp.setState({ rateLimit: r });
-    const primary = new GitHubClient({ token, baseUrl: s.apiBase || DIRECT_API, publicOnly: s.publicOnly, cache: etagCache, onRateLimit });
+    const primary = new GitHubClient({ token, baseUrl: base, publicOnly: s.publicOnly, cache: etagCache, onRateLimit });
     if (fallback) {
       // Same conditional-request cache: entries are keyed by full URL, so proxy and direct responses never mix.
       const direct = new GitHubClient({ token: fallback, baseUrl: DIRECT_API, publicOnly: s.publicOnly, cache: etagCache, onRateLimit });

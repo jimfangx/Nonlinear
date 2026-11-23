@@ -2,7 +2,7 @@ import { NavIcon } from "../components/NavIcon";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { CATEGORY_LABELS, summarizeEvents, classify, isSnoozed, isUnread, newId, type Category, type PRSnapshot } from "@nonlinear/core";
+import { CATEGORY_LABELS, prPercentReviewed, summarizeEvents, classify, isSnoozed, isUnread, newId, type Category, type PRSnapshot } from "@nonlinear/core";
 import { useApp, useSettings, type RepositoryView } from "../lib/store";
 import { refreshRepos, describeError } from "../lib/github";
 import { useChainGraph, blockedSet } from "../lib/chains";
@@ -303,6 +303,7 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
                   })()}
                 </div>
                 <PRStateChip pr={p} />
+                <MyReviewChip pr={p} />
                 <ReviewChip d={p.reviewDecision} />
                 <CIChip ci={p.ci} />
               </div>
@@ -457,5 +458,20 @@ function ViewEditor({ view, onClose }: { view: RepositoryView; onClose: () => vo
         <RepoPicker value={repos} onChange={setRepos} />
       </div>
     </Modal>
+  );
+}
+
+/** Your private review progress on this PR, once you've started (Review tab). */
+function MyReviewChip({ pr }: { pr: PRSnapshot }) {
+  const progress = useApp((s) => s.reviews[pr.key]);
+  if (!progress || !Object.keys(progress.files).length) return null;
+  const pct = Math.round(prPercentReviewed(progress, pr.changedFiles) * 100);
+  const outdated = progress.headSha !== pr.headSha;
+  const done = pct >= 100 && !outdated;
+  return (
+    <span className={`chip my-review-chip ${done ? "ok" : outdated ? "warn" : ""}`}
+      title={`${pct}% of this PR reviewed by you${outdated ? ". New commits since your last review: re-check the changed parts." : ""}`}>
+      {done ? "✓ reviewed" : `${pct}% reviewed`}{outdated ? " ⟳" : ""}
+    </span>
   );
 }

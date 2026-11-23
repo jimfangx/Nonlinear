@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Release notes · Nonlinear</title>
+<meta name="description" content="Every release of Nonlinear, the release workbench for multi-repo and submodule projects: new features, improvements and fixes.">
+<link rel="canonical" href="https://nonlinear.cx/releases">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#0f0f14" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#fbfbfc" media="(prefers-color-scheme: light)">
+<meta name="color-scheme" content="light dark">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Nonlinear">
+<meta property="og:title" content="Nonlinear release notes">
+<meta property="og:description" content="New features, improvements and fixes in every release of Nonlinear.">
+<meta property="og:url" content="https://nonlinear.cx/releases">
+<meta property="og:image" content="https://nonlinear.cx/og.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:image" content="https://nonlinear.cx/og.png">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+
+<nav aria-label="Primary">
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="">Nonlinear</a>
+    <div class="navlinks">
+      <a href="./#features">Features</a>
+      <a href="releases.html" aria-current="page">Release notes</a>
+      <a href="./#privacy">Privacy</a>
+      <a href="https://github.com/jimfangx/Nonlinear">GitHub</a>
+    </div>
+    <a class="btn btn-primary btn-sm nav-cta" href="https://github.com/jimfangx/Nonlinear/releases">Download</a>
+  </div>
+</nav>
+
+<main>
+<header class="page-head">
+  <div class="wrap">
+    <span class="kicker">Release notes</span>
+    <h1>Every release.</h1>
+    <p class="sec-lede">New features, improvements and fixes in each version of the macOS app. Downloads are on the <a href="https://github.com/jimfangx/Nonlinear/releases">GitHub releases page</a>.</p>
+  </div>
+</header>
+
+<section id="releases" style="padding-top:24px">
+  <div class="wrap">
+    <div class="notes">
+
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.15</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Type any repository.</b> Every place that asks for a repository suggests your starred and recent ones first, and searches GitHub when you type one Nonlinear hasn't seen yet.</li>
+            <li><b>Review progress in the inbox.</b> PRs you've started reviewing show how much you've reviewed, with a ⟳ when new commits arrived since.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>In side-by-side review, selecting lines selects whole rows, so marking them reviewed covers deleted and added lines alike. GitHub comments still go on the side you clicked.</li>
+            <li>The Review tab opens on your first starred repository.</li>
+            <li>Recent activity shows when changes happened on GitHub, not when Nonlinear noticed them.</li>
+            <li>macOS asks for Keychain access at most once per launch instead of repeatedly.</li>
+          </ul>
+          <h4>Fixed</h4>
+          <ul>
+            <li>Clicking a suggestion in the Git Graph's repository box now opens it.</li>
+            <li>The sync service URL and GitHub API base fields accept <code>//</code> while you type.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.14</span><span class="rel-date">November 23, 2026</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Work in organizations that block OAuth apps.</b> Some organizations only allow OAuth apps an owner has approved, so comments and reviews there used to fail even though your account had access. Add a fallback personal access token under Settings → GitHub access, and Nonlinear uses it for just those organizations while keeping your normal sign-in everywhere else.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>When an organization blocks the app, the error explains both fixes: ask an owner to approve it, or add a fallback token.</li>
+            <li>Repeat reads in those organizations reuse cached answers, so they barely touch your GitHub rate limit.</li>
+          </ul>
+        </div>
+      </article>
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.13</span><span class="rel-date">November 23, 2026</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Private sync servers.</b> If you run your own sync service, you can limit it to specific GitHub accounts. Anyone else is refused at sign-in, and removing someone also signs them out everywhere.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>A sync server that doesn't accept your account now tells you so, in the app and in the browser tab, instead of leaving sign-in waiting.</li>
+            <li>Simpler local setup for developing against the sync service.</li>
+          </ul>
+        </div>
+      </article>
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.12</span><span class="rel-date">November 22, 2026</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Go to definition and find references.</b> ⌘-click an identifier in a review, right-click it, or select it and press F12 / ⇧F12. Works in any language: the PR's changes, the full changed files (parsed for Scala, Python, Rust, TypeScript/JavaScript, C, C++ and Java), the rest of the repository, and a language server when one is set up.</li>
+            <li><b>Find in code.</b> ⌘F after clicking the diff searches the code, with match case, whole word, regex, and a mode that searches every changed file.</li>
+            <li><b>Folder tree.</b> Switch the changed-files list between a flat list and folders.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li><b>Delete local data</b> now erases everything the app stores on your device, including repo mirrors and caches, and can also remove saved tokens and API keys.</li>
+            <li>The keyboard shortcuts page (⌘/) lists the new code navigation shortcuts.</li>
+          </ul>
+        </div>
+      </article>
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.6</span><span class="rel-date">November 22, 2026</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Share with MCP.</b> On desktop, share a review selection with your local MCP clients for 30 minutes, then stop with one click.</li>
+            <li><b>Backup and restore.</b> Export all your local data, including imported diffs, to one file and restore it on another machine.</li>
+            <li><b>Commit diffs.</b> View a commit's changes from the Git Graph and from a PR's Commits tab.</li>
+            <li><b>Syntax highlighting</b> in diffs for common languages.</li>
+            <li><b>Repository shortcuts.</b> Star the repos you use most and jump between them from the Git Graph and Review.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>Fields for linking PRs and repositories suggest ones you've used before.</li>
+          </ul>
+        </div>
+      </article>
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.4</span><span class="rel-date">November 22, 2026</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Safe mode.</b> A top-bar switch that stops all GitHub writes. Changes are staged, and you review them one by one when you leave safe mode.</li>
+            <li><b>Ask AI</b> about a line or a range of lines, from the right-click menu or the toolbar. You see the prompt and estimated cost first.</li>
+            <li><b>LGTM</b> button that approves on GitHub in one click.</li>
+            <li><b>Show that you're reviewing.</b> On your first review action, Nonlinear requests a review from you, so others see you've started. You can turn this off.</li>
+            <li><b>Release notes generator.</b> Collects the PRs merged between each submodule's current and planned commit and groups them by label.</li>
+            <li><b>Color themes</b> and an optional background image with a darkness slider.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>Release pins show current → planned commit, each linked to GitHub, with a compare link.</li>
+            <li>The timeline has daily and weekly tick marks.</li>
+            <li>The PR stats box shows additions and deletions in color, with a proportional bar.</li>
+            <li>The Review tab separates the file list from the diff more clearly.</li>
+            <li>Delete private notes and discard drafts right where they appear.</li>
+            <li>⌘P opens the command palette, like ⌘K.</li>
+            <li><kbd>j</kbd> / <kbd>k</kbd> move between files in the Multi-Repo Diff viewer.</li>
+            <li>The sync status moved to the top bar.</li>
+          </ul>
+          <h4>Fixed</h4>
+          <ul>
+            <li>Clicking elsewhere now clears a line selection.</li>
+            <li>The timeline's <b>Latest</b> button only scrolls to today and no longer changes your pins.</li>
+          </ul>
+        </div>
+      </article>
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.0</span><span class="rel-date">November 22, 2026</span><span class="rel-tag">First release</span></div>
+        <div>
+          <ul>
+            <li>PR inbox across every repo you maintain, with editable categories, pinning and snoozing.</li>
+            <li>Cross-repo dependency chains from <code>Depends-On:</code> lines or the UI, with a managed chain block in each PR.</li>
+            <li>Submodule timeline and releases: pin commits, export a manifest, or open a draft PR that bumps every submodule.</li>
+            <li>Review built for big diffs, with progress that survives force-pushes, private notes and draft comments.</li>
+            <li>Kanban board, Multi-Repo Diff viewer and Git Graph.</li>
+            <li>Optional AI summaries with your own key or a local Claude Code or Codex CLI.</li>
+            <li>End-to-end-encrypted sync between devices.</li>
+          </ul>
+        </div>
+      </article>
+
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="./"><img src="icon.svg" alt="" style="width:22px;height:22px">Nonlinear</a>
+    <nav aria-label="Footer">
+      <a href="https://github.com/jimfangx/Nonlinear">GitHub</a>
+      <a href="https://github.com/jimfangx/Nonlinear/releases">Downloads</a>
+      <a href="https://github.com/jimfangx/Nonlinear/blob/main/LICENSE">MIT License</a>
+    </nav>
+    <button class="theme-btn" id="theme" type="button">Toggle theme</button>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var root = document.documentElement, key = "nl-site-theme";
+  try { var s = localStorage.getItem(key); if (s) root.dataset.theme = s; } catch (e) {}
+  document.getElementById("theme").addEventListener("click", function () {
+    var dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem(key, root.dataset.theme); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

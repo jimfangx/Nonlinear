@@ -4,7 +4,7 @@
  * clone (submodules checked out under the root) instead of cloning anything.
  */
 import { parseGitLog, parseLsTreeGitlinks, parseRefs, type CommitNode } from "@nonlinear/core";
-import { desktop, invoke, isDesktop } from "./platform";
+import { desktop, invoke } from "./platform";
 import { useApp } from "./store";
 
 export type Source =
@@ -95,7 +95,6 @@ export function availableSources(repoKey: string): Source[] {
   const out: Source[] = [{ kind: "github" }];
   const local = s.localRepos[repoKey.toLowerCase()];
   if (local) out.push({ kind: "local", path: local });
-  if (isDesktop()) out.push({ kind: "mirror", repoKey: repoKey.toLowerCase() });
   for (const h of s.sshHosts.filter((x) => x.allowed)) out.push({ kind: "ssh", alias: h.alias, root: h.root, repo: "" });
   return out;
 }

@@ -2,7 +2,8 @@ import { AskAI, type AskTarget } from "../components/AskAI";
 import { DiffCodeLayoutSelect, useDiffCodeLayout } from "../components/FileDiff";
 import { CommitDiff } from "../components/CommitDiff";
 import { NavIcon } from "../components/NavIcon";
-import { RepositoryShortcuts, useCachedRepositories } from "../components/RepositoryShortcuts";
+import { RepositoryShortcuts, useCachedRepositories, repositoryFromInput } from "../components/RepositoryShortcuts";
+import { RepoEntry } from "../components/RepoEntry";
 import { useShallow } from "zustand/react/shallow";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
@@ -38,7 +39,21 @@ import { ReviewFiles } from "./ReviewFiles";
 export function ReviewHome() {
   const prs = useApp((s) => s.prs);
   const repos = useCachedRepositories();
-  const [repo, setRepo] = useState(repos[0] ?? "");
+  // Start on the first starred (pinned) repository, else the most recently used, else the first known one.
+  const [repo, setRepo] = useState(() => {
+    const layout = useApp.getState().settings_().layout;
+    const pinned = (layout.graphPinned as string[] | undefined) ?? [];
+    const recent = (layout.graphRecent as string[] | undefined) ?? [];
+    return (pinned[0] ?? recent[0] ?? repos[0] ?? "").toLowerCase();
+  });
+  const [repoInput, setRepoInput] = useState(repo);
+  const openRepo = (text: string) => {
+    const key = repositoryFromInput(text);
+    if (!key) { setErr("Enter a repository as owner/repo (or paste its GitHub URL)."); return; }
+    setErr(null);
+    setRepoInput(key);
+    setRepo(key);
+  };
   const [state, setState] = useState<"open" | "closed" | "all">("open");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -71,13 +86,10 @@ export function ReviewHome() {
     <div className="page">
       <h1 className="h1">Review</h1>
       <div className="row" style={{ marginBottom: 12, flexWrap: "wrap" }}>
-        <select className="input" value={repo} onChange={(e) => setRepo(e.target.value)} aria-label="Repository">
-          {!repos.length && <option value="">Add repositories to a view first</option>}
-          {repos.map((r) => (
-            <option key={r}>{r}</option>
-          ))}
-        </select>
-        <RepositoryShortcuts current={repo || null} repositories={repos} onOpen={setRepo} />
+        <form className="review-repo-picker" onSubmit={(e) => { e.preventDefault(); openRepo(repoInput); }}>
+          <RepoEntry value={repoInput} onChange={setRepoInput} onSelect={openRepo} placeholder="owner/repo — type, pick a recent one, or search GitHub" />
+        </form>
+        <RepositoryShortcuts current={repo || null} repositories={repos} onOpen={openRepo} />
         <div className="row" role="tablist">
           {(["all", "open", "closed"] as const).map((s) => (
             <button key={s} role="tab" aria-selected={state === s} className={`btn sm ${state === s ? "primary" : ""}`} onClick={() => setState(s)}>

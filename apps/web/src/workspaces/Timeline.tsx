@@ -1,4 +1,6 @@
 import { copyText } from "../lib/clipboard";
+import { RepoEntry } from "../components/RepoEntry";
+import { repositoryFromInput } from "../components/RepositoryShortcuts";
 import { NavIcon } from "../components/NavIcon";
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, useCallback, useSyncExternalStore } from "react";
 import { flushSync } from "react-dom";
@@ -264,7 +266,7 @@ function CreateTimeline({ onClose }: { onClose: () => void }) {
       <div className="col">
         <label className="col" style={{ gap: 2 }}>
           <span className="small muted">Root repository</span>
-          <input className="input" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="owner/repo" />
+          <RepoEntry label="Root repository" placeholder="owner/repo" value={root} onChange={setRoot} onSelect={(v) => setRoot(repositoryFromInput(v) ?? v)} />
         </label>
         <label className="col" style={{ gap: 2 }}>
           <span className="small muted">Baseline branch/ref</span>

@@ -1,4 +1,6 @@
 import { NavIcon } from "../components/NavIcon";
+import { RepoEntry } from "../components/RepoEntry";
+import { repositoryFromInput } from "../components/RepositoryShortcuts";
 import { useShallow } from "zustand/react/shallow";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
@@ -85,7 +87,7 @@ function CreateRelease({ onClose }: { onClose: () => void }) {
     >
       <div className="col">
         <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Release name" aria-label="Name" />
-        <input className="input" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="owner/repo (optional)" aria-label="Root repository" />
+        <RepoEntry label="Root repository" placeholder="owner/repo (optional)" value={root} onChange={setRoot} onSelect={(v) => setRoot(repositoryFromInput(v) ?? v)} />
         <div className="row">
           {RELEASE_COLORS.map((c) => (
             <button key={c} className="btn sm" aria-label={`Color ${c}`} style={{ background: c, width: 24, outline: c === color ? "2px solid var(--text)" : undefined }} onClick={() => setColor(c)} />

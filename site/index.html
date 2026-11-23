@@ -43,7 +43,7 @@
   "screenshot": "https://nonlinear.cx/screenshots/review-nav.png",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Web",
-  "softwareVersion": "0.1.14",
+  "softwareVersion": "0.1.15",
   "license": "https://opensource.org/licenses/MIT",
   "isAccessibleForFree": true,
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -54,213 +54,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<style>
-:root {
-  --bg: #fbfbfc; --bg-2: #f3f3f6; --panel: #ffffff;
-  --border: #e2e2ea; --border-strong: #cfcfda;
-  --text: #1b1b24; --text-2: #55556a; --text-3: #62627a;
-  --accent: #5b4bd6; --accent-2: #ede9ff; --on-accent: #fff;
-  --ok: #137236; --ok-bg: #e3f6eb; --warn: #8a5a0f; --warn-bg: #fdf3dc;
-  --err: #c03030; --info: #1a5fb8; --info-bg: #e5f0fd;
-  --add-bg: #e6f7ec; --del-bg: #fdecec; --hunk-bg: #f0eefc;
-  --glow: rgba(91,75,214,.18);
-  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
-  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  color-scheme: light;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg: #0f0f14; --bg-2: #16161d; --panel: #18181f;
-    --border: #2a2a35; --border-strong: #3a3a48;
-    --text: #ececf3; --text-2: #b4b4c8; --text-3: #9a9ab0;
-    --accent: #a497ff; --accent-2: #2a2550; --on-accent: #16161d;
-    --ok: #5fd39a; --ok-bg: #173325; --warn: #f0c070; --warn-bg: #3a2e14;
-    --err: #ff8f8f; --info: #86b8ff; --info-bg: #1a2a44;
-    --add-bg: #15291e; --del-bg: #2e1719; --hunk-bg: #211f38;
-    --glow: rgba(164,151,255,.16);
-    color-scheme: dark;
-  }
-}
-:root[data-theme="dark"] {
-  --bg: #0f0f14; --bg-2: #16161d; --panel: #18181f;
-  --border: #2a2a35; --border-strong: #3a3a48;
-  --text: #ececf3; --text-2: #b4b4c8; --text-3: #9a9ab0;
-  --accent: #a497ff; --accent-2: #2a2550; --on-accent: #16161d;
-  --ok: #5fd39a; --ok-bg: #173325; --warn: #f0c070; --warn-bg: #3a2e14;
-  --err: #ff8f8f; --info: #86b8ff; --info-bg: #1a2a44;
-  --add-bg: #15291e; --del-bg: #2e1719; --hunk-bg: #211f38;
-  --glow: rgba(164,151,255,.16);
-  color-scheme: dark;
-}
-* { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 var(--sans); -webkit-font-smoothing: antialiased; overflow-x: hidden; }
-a { color: inherit; }
-.wrap { max-width: 1120px; margin: 0 auto; padding: 0 16px; }
-@media (min-width: 720px) { .wrap { padding: 0 32px; } }
-
-/* nav */
-nav { position: sticky; top: 0; z-index: 10; backdrop-filter: saturate(1.6) blur(12px); background: color-mix(in srgb, var(--bg) 78%, transparent); border-bottom: 1px solid var(--border); }
-nav .wrap { display: flex; align-items: center; gap: 24px; height: 60px; }
-.brand { display: flex; align-items: center; gap: 10px; font-weight: 700; letter-spacing: -.01em; text-decoration: none; }
-.brand img { width: 28px; height: 28px; }
-.navlinks { display: none; gap: 22px; margin-left: auto; font-size: 14px; color: var(--text-2); }
-.navlinks a { text-decoration: none; }
-.navlinks a:hover { color: var(--text); }
-@media (min-width: 760px) { .navlinks { display: flex; } }
-.nav-cta { margin-left: auto; }
-@media (min-width: 760px) { .nav-cta { margin-left: 0; } }
-
-.btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 9px; font-weight: 600; font-size: 15px; text-decoration: none; border: 1px solid transparent; transition: transform .12s, box-shadow .12s, background .12s; white-space: nowrap; }
-.btn:hover { transform: translateY(-1px); }
-.btn-primary { background: var(--accent); color: var(--on-accent); box-shadow: 0 6px 20px var(--glow); }
-.btn-ghost { border-color: var(--border-strong); background: var(--panel); }
-.btn-sm { padding: 7px 14px; font-size: 14px; }
-
-/* hero */
-.hero { position: relative; padding: 72px 0 40px; text-align: center; }
-.hero::before { content: ""; position: absolute; inset: -120px 0 auto; height: 620px; background: radial-gradient(600px 300px at 50% 30%, var(--glow), transparent 70%); pointer-events: none; z-index: -1; }
-.eyebrow { display: inline-flex; gap: 8px; align-items: center; font-size: 13px; font-weight: 500; color: var(--text-2); border: 1px solid var(--border); background: var(--panel); padding: 5px 12px; border-radius: 99px; }
-.eyebrow b { color: var(--accent); font-weight: 600; }
-h1 { font-size: clamp(38px, 7vw, 68px); line-height: 1.04; letter-spacing: -.035em; margin: 22px auto 18px; max-width: 900px; font-weight: 800; }
-h1 em { font-style: normal; background: linear-gradient(90deg, var(--accent) 8%, #c56cf0 42%, #ff5c8a 78%, #ff8f5a 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
-.lede { font-size: clamp(17px, 2.2vw, 20px); color: var(--text-2); max-width: 680px; margin: 0 auto 32px; }
-.ctas { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
-.fine { margin-top: 14px; font-size: 13px; color: var(--text-3); }
-
-/* screenshots */
-.shot { display: block; margin: 0; border: 1px solid var(--border-strong); border-radius: 12px; overflow: hidden; background: #111117; box-shadow: 0 24px 60px -24px rgba(20,20,40,.45), 0 0 0 1px var(--border); }
-.shot img { display: block; width: 100%; height: auto; }
-.hero .shot { margin: 56px auto 0; max-width: 1080px; border-radius: 14px; box-shadow: 0 40px 100px -30px rgba(20,20,40,.55), 0 0 0 1px var(--border); }
-.stack { display: grid; gap: 16px; }
-.feature .shot-tall { max-width: 560px; width: 100%; justify-self: center; }
-figcaption { font-size: 13px; color: var(--text-3); margin-top: 10px; text-align: center; }
-
-/* sections */
-section { padding: 64px 0; }
-.privacy, .final { padding: 88px 0; }
-.kicker { font-size: 13px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
-h2 { font-size: clamp(28px, 4.2vw, 42px); line-height: 1.12; letter-spacing: -.025em; margin: 10px 0 14px; font-weight: 750; }
-.sec-lede { color: var(--text-2); font-size: 18px; max-width: 640px; margin: 0; }
-
-.pillars { display: grid; gap: 16px; grid-template-columns: 1fr; margin-top: 40px; }
-@media (min-width: 760px) { .pillars { grid-template-columns: repeat(3, 1fr); } }
-.pillar { padding: 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--panel); }
-.pillar .ic { width: 38px; height: 38px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-2); color: var(--accent); margin-bottom: 14px; }
-.pillar h3 { margin: 0 0 6px; font-size: 17px; }
-.pillar p { margin: 0; color: var(--text-2); font-size: 15px; }
-
-.feature { display: grid; gap: 28px; align-items: center; grid-template-columns: 1fr; padding: 48px 0; border-top: 1px solid var(--border); }
-@media (min-width: 900px) { .feature { grid-template-columns: minmax(0, 1fr) minmax(0, 1.6fr); gap: 48px; } .feature.flip { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); } .feature.flip > :first-child { order: 2; } }
-.feature > .shot { align-self: end; }
-.feature:first-child { border-top: 0; padding-top: 8px; }
-.feature:last-child { padding-bottom: 0; }
-.feature h3 { font-size: 26px; letter-spacing: -.02em; margin: 6px 0 10px; line-height: 1.2; }
-.feature p { color: var(--text-2); margin: 0 0 14px; }
-.feature ul { margin: 0; padding: 0; list-style: none; color: var(--text-2); font-size: 15px; }
-.feature li { padding-left: 22px; position: relative; margin: 6px 0; }
-.feature li::before { content: ""; position: absolute; left: 2px; top: .62em; width: 8px; height: 8px; border-radius: 2px; background: var(--accent); transform: rotate(45deg); }
-.panel { border: 1px solid var(--border); border-radius: 14px; background: var(--panel); padding: 18px; box-shadow: 0 16px 40px -24px rgba(20,20,40,.35); min-width: 0; overflow: hidden; }
-code, .mono { font-family: var(--mono); font-size: .9em; }
-kbd { font-family: var(--mono); font-size: .85em; padding: 1px 6px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--panel); }
-
-/* grid of small features */
-.grid { display: grid; gap: 1px; grid-template-columns: 1fr; background: var(--border); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; margin-top: 40px; }
-@media (min-width: 640px) { .grid { grid-template-columns: repeat(2, 1fr); } }
-@media (min-width: 960px) { .grid { grid-template-columns: repeat(3, 1fr); } }
-.cell { background: var(--panel); padding: 24px; }
-.cell h4 { margin: 0 0 6px; font-size: 16px; }
-.cell p { margin: 0; color: var(--text-2); font-size: 14.5px; }
-
-/* release notes */
-.notes { margin-top: 36px; display: grid; gap: 0; }
-.rel { display: grid; grid-template-columns: 1fr; gap: 8px 32px; padding: 28px 0; border-top: 1px solid var(--border); }
-@media (min-width: 760px) { .rel { grid-template-columns: 180px 1fr; } }
-.rel-meta { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
-@media (min-width: 760px) { .rel-meta { flex-direction: column; gap: 4px; } }
-.rel-ver { font-family: var(--mono); font-size: 20px; font-weight: 600; letter-spacing: -.01em; }
-.rel-date { font-size: 13px; color: var(--text-3); }
-.rel-tag { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--accent); background: var(--accent-2); padding: 2px 8px; border-radius: 99px; }
-.rel:last-child { padding-bottom: 0; }
-.rel h4 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-3); }
-.rel h4:not(:first-child) { margin-top: 18px; }
-.rel ul { margin: 0; padding-left: 20px; color: var(--text-2); font-size: 15px; }
-.rel li { margin: 4px 0; }
-.rel li b { color: var(--text); font-weight: 600; }
-
-/* privacy */
-.privacy { background: var(--bg-2); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.priv-grid { display: grid; gap: 28px; grid-template-columns: 1fr; margin-top: 36px; }
-@media (min-width: 760px) { .priv-grid { grid-template-columns: repeat(2, 1fr); } }
-.priv-grid h4 { margin: 0 0 4px; font-size: 16px; display: flex; gap: 10px; align-items: center; }
-.priv-grid p { margin: 0; color: var(--text-2); font-size: 15px; }
-
-/* cta */
-.final { text-align: center; }
-.final .panel { padding: 56px 24px; background: radial-gradient(500px 220px at 50% 0%, var(--glow), transparent 70%), var(--panel); }
-pre.cmd { display: inline-block; text-align: left; margin: 26px 0 0; padding: 14px 18px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; max-width: 100%; overflow-x: auto; }
-pre.cmd .p { color: var(--text-3); user-select: none; }
-
-footer { padding: 36px 0 48px; color: var(--text-3); font-size: 14px; }
-footer .wrap { display: flex; gap: 16px; justify-content: space-between; flex-wrap: wrap; align-items: center; }
-footer nav { all: unset; display: flex; gap: 18px; }
-footer a { text-decoration: none; } footer a:hover { color: var(--text); }
-.theme-btn { background: none; border: 1px solid var(--border); color: var(--text-2); border-radius: 8px; padding: 6px 10px; cursor: pointer; font: inherit; font-size: 13px; }
-
-/* ---------- motion ---------- */
-nav { transition: background .3s, border-color .3s, box-shadow .3s; }
-nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
-.hero { overflow: hidden; }
-.hero::after { content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none;
-  background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px);
-  background-size: 56px 56px; opacity: .45;
-  -webkit-mask-image: radial-gradient(700px 380px at 50% 0%, #000 20%, transparent 75%); mask-image: radial-gradient(700px 380px at 50% 0%, #000 20%, transparent 75%); }
-.hero .shot::before { content: ""; position: absolute; inset: 0; border-radius: inherit; padding: 1px; pointer-events: none; z-index: 2;
-  background: conic-gradient(from var(--ang, 0deg), transparent 0 70%, var(--accent) 80%, #e06ad8 88%, transparent 96%);
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; }
-.shot { position: relative; }
-.shot::after { content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 1;
-  background: linear-gradient(105deg, transparent 30%, color-mix(in srgb, var(--accent) 7%, transparent) 50%, transparent 70%); transform: translateX(-120%); }
-.pillar, .cell, .final .panel { position: relative; overflow: hidden; }
-.pillar::before, .cell::before, .final .panel::before { content: ""; position: absolute; inset: 0; pointer-events: none; opacity: 0; transition: opacity .3s;
-  background: radial-gradient(360px circle at var(--mx, 50%) var(--my, 50%), var(--glow), transparent 60%); }
-.pillar:hover::before, .cell:hover::before, .final .panel:hover::before { opacity: 1; }
-.pillar { transition: border-color .3s, transform .3s; }
-.pillar:hover { border-color: var(--border-strong); }
-
-@property --ang { syntax: "<angle>"; inherits: false; initial-value: 0deg; }
-
-@media (prefers-reduced-motion: no-preference) {
-  .hero::before { animation: drift 14s ease-in-out infinite alternate; }
-  @keyframes drift { from { transform: translate3d(-6%, 0, 0) scale(1); } to { transform: translate3d(6%, 4%, 0) scale(1.12); } }
-  .hero .shot::before { animation: spin 7s linear infinite; }
-  @keyframes spin { to { --ang: 360deg; } }
-
-  .js .hero .eyebrow, .js .hero h1, .js .hero .lede, .js .hero .ctas, .js .hero .fine {
-    opacity: 0; animation: rise .9s cubic-bezier(.2,.7,.2,1) forwards; }
-  .js .hero h1 { animation-delay: .08s; }
-  .js .hero .lede { animation-delay: .18s; }
-  .js .hero .ctas { animation-delay: .28s; }
-  .js .hero .fine { animation-delay: .36s; }
-  @keyframes rise { from { opacity: 0; translate: 0 18px; filter: blur(8px); } to { opacity: 1; translate: 0 0; filter: blur(0); } }
-  .js .hero .shot { opacity: 0; animation: lift 1.3s cubic-bezier(.2,.7,.2,1) .45s forwards; }
-  @keyframes lift { from { opacity: 0; translate: 0 70px; } to { opacity: 1; translate: 0 0; } }
-
-  .js .reveal { opacity: 0; translate: 0 28px; filter: blur(6px);
-    transition: opacity .9s cubic-bezier(.2,.7,.2,1), translate .9s cubic-bezier(.2,.7,.2,1), filter .9s; transition-delay: var(--d, 0ms); }
-  .js .reveal.in { opacity: 1; translate: 0 0; filter: none; }
-  .js .shot.reveal { translate: 0 40px; scale: .97; transition-property: opacity, translate, filter, scale, transform, box-shadow; }
-  .js .shot.reveal.in { transition-delay: 0ms; }
-  .js .shot.reveal.in { scale: 1; translate: 0 0; }
-  .shot.in::after { animation: sweep 2.4s ease-in-out .4s 1 both; }
-  @keyframes sweep { to { transform: translateX(120%); } }
-  .feature .shot { transition: transform .6s cubic-bezier(.22,.61,.36,1), box-shadow .6s cubic-bezier(.22,.61,.36,1); backface-visibility: hidden; }
-  .feature:hover .shot { transform: translate3d(0, -4px, 0); box-shadow: 0 36px 72px -32px rgba(20,20,40,.5), 0 0 0 1px var(--border-strong); }
-  .pillar:hover { transform: translateY(-3px); }
-  .btn-primary { background-image: linear-gradient(110deg, transparent 30%, rgba(255,255,255,.28) 50%, transparent 70%); background-size: 250% 100%; background-position: 120% 0; transition: transform .12s, box-shadow .2s, background-position .7s; }
-  .btn-primary:hover { background-position: -20% 0; box-shadow: 0 10px 30px var(--glow); }
-}
-</style>
+<link rel="stylesheet" href="site.css">
 </head>
 <body>
 
@@ -281,7 +75,7 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
 <main>
 <header class="hero">
   <div class="wrap">
-    <a class="eyebrow" href="#releases" style="text-decoration:none"><b>New in 0.1.14</b> Works in orgs that block OAuth apps <span aria-hidden="true">→</span></a>
+    <a class="eyebrow" href="#releases" style="text-decoration:none"><b>New in 0.1.15</b> Type any repo · Review progress in the inbox <span aria-hidden="true">→</span></a>
     <h1>Ship releases that span <em>dozens of repos</em>.</h1>
     <p class="lede">Nonlinear is the release workbench for maintainers whose work doesn't fit in one repository. Triage PRs, untangle cross-repo dependency chains, pin submodules and review huge diffs, all in one place.</p>
     <div class="ctas">
@@ -417,7 +211,7 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
       <div>
         <span class="kicker">Git graph</span>
         <h3>See history, tags and pins together.</h3>
-        <p>A lane graph with refs, PRs and the submodule pins at each commit. Data comes from the GitHub API, your working tree, a partial mirror, or a remote machine over SSH.</p>
+        <p>A lane graph with refs, PRs and the submodule pins at each commit. Data comes from the GitHub API, your working tree, or a remote machine over SSH.</p>
         <ul>
           <li>Commit diffs, compare and merge previews</li>
           <li>Open the timeline at any commit</li>
@@ -450,11 +244,34 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
   <div class="wrap">
     <span class="kicker">Release notes</span>
     <h2>What's new.</h2>
-    <p class="sec-lede">Recent releases of the macOS app. Downloads are on the <a href="https://github.com/jimfangx/Nonlinear/releases">GitHub releases page</a>.</p>
+    <p class="sec-lede">The latest releases of the macOS app. Downloads are on the <a href="https://github.com/jimfangx/Nonlinear/releases">GitHub releases page</a>.</p>
     <div class="notes">
 
       <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.14</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div class="rel-meta"><span class="rel-ver">0.1.15</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Type any repository.</b> Every place that asks for a repository suggests your starred and recent ones first, and searches GitHub when you type one Nonlinear hasn't seen yet.</li>
+            <li><b>Review progress in the inbox.</b> PRs you've started reviewing show how much you've reviewed, with a ⟳ when new commits arrived since.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>In side-by-side review, selecting lines selects whole rows, so marking them reviewed covers deleted and added lines alike. GitHub comments still go on the side you clicked.</li>
+            <li>The Review tab opens on your first starred repository.</li>
+            <li>Recent activity shows when changes happened on GitHub, not when Nonlinear noticed them.</li>
+            <li>macOS asks for Keychain access at most once per launch instead of repeatedly.</li>
+          </ul>
+          <h4>Fixed</h4>
+          <ul>
+            <li>Clicking a suggestion in the Git Graph's repository box now opens it.</li>
+            <li>The sync service URL and GitHub API base fields accept <code>//</code> while you type.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.14</span><span class="rel-date">November 23, 2026</span></div>
         <div>
           <h4>New</h4>
           <ul>
@@ -483,87 +300,9 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
         </div>
       </article>
 
-      <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.12</span><span class="rel-date">November 22, 2026</span></div>
-        <div>
-          <h4>New</h4>
-          <ul>
-            <li><b>Go to definition and find references.</b> ⌘-click an identifier in a review, right-click it, or select it and press F12 / ⇧F12. Works in any language: the PR's changes, the full changed files (parsed for Scala, Python, Rust, TypeScript/JavaScript, C, C++ and Java), the rest of the repository, and a language server when one is set up.</li>
-            <li><b>Find in code.</b> ⌘F after clicking the diff searches the code, with match case, whole word, regex, and a mode that searches every changed file.</li>
-            <li><b>Folder tree.</b> Switch the changed-files list between a flat list and folders.</li>
-          </ul>
-          <h4>Improved</h4>
-          <ul>
-            <li><b>Delete local data</b> now erases everything the app stores on your device, including repo mirrors and caches, and can also remove saved tokens and API keys.</li>
-            <li>The keyboard shortcuts page (⌘/) lists the new code navigation shortcuts.</li>
-          </ul>
-        </div>
-      </article>
-
-      <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.6</span><span class="rel-date">November 22, 2026</span></div>
-        <div>
-          <h4>New</h4>
-          <ul>
-            <li><b>Share with MCP.</b> On desktop, share a review selection with your local MCP clients for 30 minutes, then stop with one click.</li>
-            <li><b>Backup and restore.</b> Export all your local data, including imported diffs, to one file and restore it on another machine.</li>
-            <li><b>Commit diffs.</b> View a commit's changes from the Git Graph and from a PR's Commits tab.</li>
-            <li><b>Syntax highlighting</b> in diffs for common languages.</li>
-            <li><b>Repository shortcuts.</b> Star the repos you use most and jump between them from the Git Graph and Review.</li>
-          </ul>
-          <h4>Improved</h4>
-          <ul>
-            <li>Fields for linking PRs and repositories suggest ones you've used before.</li>
-          </ul>
-        </div>
-      </article>
-
-      <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.4</span><span class="rel-date">November 22, 2026</span></div>
-        <div>
-          <h4>New</h4>
-          <ul>
-            <li><b>Safe mode.</b> A top-bar switch that stops all GitHub writes. Changes are staged, and you review them one by one when you leave safe mode.</li>
-            <li><b>Ask AI</b> about a line or a range of lines, from the right-click menu or the toolbar. You see the prompt and estimated cost first.</li>
-            <li><b>LGTM</b> button that approves on GitHub in one click.</li>
-            <li><b>Show that you're reviewing.</b> On your first review action, Nonlinear requests a review from you, so others see you've started. You can turn this off.</li>
-            <li><b>Release notes generator.</b> Collects the PRs merged between each submodule's current and planned commit and groups them by label.</li>
-            <li><b>Color themes</b> and an optional background image with a darkness slider.</li>
-          </ul>
-          <h4>Improved</h4>
-          <ul>
-            <li>Release pins show current → planned commit, each linked to GitHub, with a compare link.</li>
-            <li>The timeline has daily and weekly tick marks.</li>
-            <li>The PR stats box shows additions and deletions in color, with a proportional bar.</li>
-            <li>The Review tab separates the file list from the diff more clearly.</li>
-            <li>Delete private notes and discard drafts right where they appear.</li>
-            <li>⌘P opens the command palette, like ⌘K.</li>
-            <li><kbd>j</kbd> / <kbd>k</kbd> move between files in the Multi-Repo Diff viewer.</li>
-            <li>The sync status moved to the top bar.</li>
-          </ul>
-          <h4>Fixed</h4>
-          <ul>
-            <li>Clicking elsewhere now clears a line selection.</li>
-            <li>The timeline's <b>Latest</b> button only scrolls to today and no longer changes your pins.</li>
-          </ul>
-        </div>
-      </article>
-
-      <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.0</span><span class="rel-date">November 22, 2026</span><span class="rel-tag">First release</span></div>
-        <div>
-          <ul>
-            <li>PR inbox across every repo you maintain, with editable categories, pinning and snoozing.</li>
-            <li>Cross-repo dependency chains from <code>Depends-On:</code> lines or the UI, with a managed chain block in each PR.</li>
-            <li>Submodule timeline and releases: pin commits, export a manifest, or open a draft PR that bumps every submodule.</li>
-            <li>Review built for big diffs, with progress that survives force-pushes, private notes and draft comments.</li>
-            <li>Kanban board, Multi-Repo Diff viewer and Git Graph.</li>
-            <li>Optional AI summaries with your own key or a local Claude Code or Codex CLI.</li>
-            <li>End-to-end-encrypted sync between devices.</li>
-          </ul>
-        </div>
-      </article>
-
+    </div>
+    <div class="notes-more">
+      <a class="btn btn-ghost btn-sm" href="releases.html">All release notes →</a>
     </div>
   </div>
 </section>
@@ -603,7 +342,8 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
     <a class="brand" href="#"><img src="icon.svg" alt="" style="width:22px;height:22px">Nonlinear</a>
     <nav aria-label="Footer">
       <a href="https://github.com/jimfangx/Nonlinear">GitHub</a>
-      <a href="https://github.com/jimfangx/Nonlinear/releases">Releases</a>
+      <a href="releases.html">Release notes</a>
+      <a href="https://github.com/jimfangx/Nonlinear/releases">Downloads</a>
       <a href="https://github.com/jimfangx/Nonlinear/blob/main/LICENSE">MIT License</a>
     </nav>
     <button class="theme-btn" id="theme" type="button">Toggle theme</button>

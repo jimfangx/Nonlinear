@@ -1,4 +1,6 @@
 import { getBlob, putBlob } from "../lib/db";
+import { RepoEntry } from "../components/RepoEntry";
+import { repositoryFromInput } from "../components/RepositoryShortcuts";
 import { gitShowFile } from "../lib/sources";
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -119,7 +121,7 @@ export function DiffWorkspace() {
           <div className="row">
             <label className="col grow" style={{ gap: 2 }}>
               <span className="small muted">Root repository (optional, resolves submodule identities)</span>
-              <input className="input" value={root} onChange={(e) => setRoot(e.target.value)} data-workspace-entry placeholder="owner/repo" />
+              <RepoEntry label="Root repository" placeholder="owner/repo" value={root} onChange={setRoot} onSelect={(v) => setRoot(repositoryFromInput(v) ?? v)} />
             </label>
             <label className="col" style={{ gap: 2, width: 140 }}>
               <span className="small muted">Ref</span>

@@ -15,6 +15,7 @@ import { useApp, useSettings } from "../lib/store";
 import { Split } from "../components/ui";
 import { useActions } from "../lib/keys";
 import { CachedEntry } from "../components/CachedEntry";
+import { RepoEntry } from "../components/RepoEntry";
 import { useCachedRepositories } from "../components/RepositoryShortcuts";
 import { renderMarkdown } from "../lib/markdown";
 import { useChainGraph } from "../lib/chains";
@@ -281,8 +282,7 @@ function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void 
                 </button>
               </div>
             ))}
-            <CachedEntry label="Link repository" placeholder="owner/repo + Enter" value={repoIn} onChange={setRepoIn} onSelect={linkRepo}
-              options={repositories.filter((repo) => !c.repos.includes(repo)).map((value) => ({ value }))} />
+            <RepoEntry label="Link repository" placeholder="owner/repo + Enter" value={repoIn} onChange={setRepoIn} onSelect={linkRepo} exclude={c.repos} />
             <h3 className="h3">Depends on cards</h3>
             <select aria-label="Add card dependency" className="input" value="" onChange={(e) => e.target.value && save({ ...c, dependsOn: [...new Set([...c.dependsOn, e.target.value])] })}>
               <option value="">Add dependency…</option>

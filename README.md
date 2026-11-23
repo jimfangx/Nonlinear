@@ -72,7 +72,7 @@ Import a JSON diff that spans the root repo and its submodules. A 51 MB, 3,500-f
 <img src="site/screenshots/diff.png" alt="Multi-Repo Diff viewer with files grouped by repository and a side-by-side diff" width="100%">
 
 ### 🌿 Git graph
-A lane graph with refs, PRs and the submodule pins at each commit, plus commit diffs, compare and merge previews. Data can come from the GitHub API, your local working tree, a managed partial mirror, or a remote machine over SSH.
+A lane graph with refs, PRs and the submodule pins at each commit, plus commit diffs, compare and merge previews. Data can come from the GitHub API, your local working tree, or a remote machine over SSH.
 
 <img src="site/screenshots/graph.png" alt="Git Graph with a selected commit and its submodule pins" width="100%">
 
@@ -92,7 +92,7 @@ Bring your own API key, or use a local **Claude Code** or **Codex CLI** install.
 ## Install
 
 ### macOS app
-Download the latest `.dmg` (currently **0.1.14**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
+Download the latest `.dmg` (currently **0.1.15**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
 
 > Current builds are Apple Silicon only and ad-hoc signed. The first time you open the app, right-click it and choose **Open**.
 

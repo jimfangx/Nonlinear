@@ -1,14 +1,16 @@
+import { exportBackup, restoreBackup } from "../lib/backup";
 import { useShallow } from "zustand/react/shallow";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { fnv1a, monthOf, newSalt, parsePRKey, revalidate, type Intention, type RepoAIPolicy } from "@nonlinear/core";
 import { useApp, useSettings, DEFAULT_KEYS, DEFAULT_LSP } from "../lib/store";
-import { getSecret, setSecret, wipeAll, loadAll } from "../lib/db";
-import { githubApi, resetClient, describeError, freshCapabilities, enrichPR, updatePRFields, writeChainBlock } from "../lib/github";
+import { getSecret, setSecret, putBlob, getBlob, deleteBlob, eraseEverything } from "../lib/db";
+import { BACKGROUND_BLOB, COLOR_THEMES } from "../lib/theme";
+import { githubApi, githubAvatarUrl, resetClient, describeError, freshCapabilities, enrichPR, updatePRFields, writeChainBlock } from "../lib/github";
 import { resolveConflict, syncOnce } from "../lib/sync";
 import { cloudUrl, connect, currentState, disconnect, recoveryKey, requestPairing, resetEncryption, applyRecoveryKey, DEFAULT_CLOUD_URL, type CloudState } from "../lib/cloud";
 import { PROVIDERS } from "../lib/ai";
 import { isDesktop, desktop } from "../lib/platform";
-import { download, timeAgo } from "../components/ui";
+import { download, timeAgo, Modal } from "../components/ui";
 
 export function SettingsPage() {
   useEffect(() => {
@@ -18,6 +20,7 @@ export function SettingsPage() {
     <div className="page settings-page">
       <div className="settings-content">
         <h1 className="h1">Settings</h1>
+        <AppearanceSection />
         <CloudSection />
         <ConflictsSection />
         <GitHubSection />
@@ -43,6 +46,80 @@ function Section({ title, children, id }: { title: string; children: React.React
   );
 }
 
+/* ---------------- Appearance ---------------- */
+
+function AppearanceSection() {
+  const s = useSettings();
+  const set = useApp((x) => x.setSettings);
+  const toast = useApp((x) => x.toast);
+  const [preview, setPreview] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    if (!s.backgroundImage) { setPreview(null); return; }
+    void getBlob(BACKGROUND_BLOB).then((d) => { if (active) setPreview(d ?? null); });
+    return () => { active = false; };
+  }, [s.backgroundImage]);
+  const pick = (file: File | undefined) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return toast("error", "Choose an image file.");
+    if (file.size > 12 * 1024 * 1024) return toast("error", "Images up to 12 MB are supported.");
+    const reader = new FileReader();
+    reader.onload = async () => {
+      await putBlob(BACKGROUND_BLOB, String(reader.result));
+      set({ backgroundImage: `${file.name}:${Date.now()}` });
+    };
+    reader.readAsDataURL(file);
+  };
+  return (
+    <Section title="Appearance" id="appearance">
+      <div className="row">
+        <span style={{ width: 110 }}>Mode</span>
+        {(["system", "light", "dark"] as const).map((t) => (
+          <label key={t} className="row small"><input type="radio" name="theme-mode" checked={s.theme === t} onChange={() => set({ theme: t })} /> {t[0]!.toUpperCase() + t.slice(1)}</label>
+        ))}
+      </div>
+      <div className="row" style={{ alignItems: "flex-start" }}>
+        <span style={{ width: 110, flex: "none" }}>Color theme</span>
+        <div className="theme-swatches" role="group" aria-label="Color theme">
+          {COLOR_THEMES.map((t) => (
+            <button key={t.id} type="button" className="theme-swatch" aria-pressed={s.colorTheme === t.id} onClick={() => set({ colorTheme: t.id })}>
+              <i style={{ background: `linear-gradient(135deg, ${t.light.accent} 50%, ${t.dark.accent} 50%)` }} /> {t.label}
+            </button>
+          ))}
+          <button type="button" className="theme-swatch" aria-pressed={s.colorTheme === "custom"} onClick={() => set({ colorTheme: "custom" })}>
+            <i style={{ background: `linear-gradient(135deg, ${s.customAccentLight} 50%, ${s.customAccentDark} 50%)` }} /> Custom
+          </button>
+        </div>
+      </div>
+      {s.colorTheme === "custom" && <div className="row" style={{ marginLeft: 110 }}>
+        <label className="row small">Light accent <input type="color" value={s.customAccentLight} onChange={(event) => set({ customAccentLight: event.target.value })} /></label>
+        <label className="row small">Dark accent <input type="color" value={s.customAccentDark} onChange={(event) => set({ customAccentDark: event.target.value })} /></label>
+      </div>}
+      <div className="row" style={{ alignItems: "flex-start" }}>
+        <span style={{ width: 110, flex: "none" }}>Background</span>
+        <div className="col" style={{ gap: 8 }}>
+          <div className="row">
+            {preview && <div className="bg-preview" style={{ backgroundImage: `url("${preview}")` }}><div className="app-background-mask" style={{ opacity: s.backgroundDim }} /></div>}
+            <label className="btn sm">
+              {preview ? "Change image…" : "Choose image…"}
+              <input type="file" accept="image/*" hidden onChange={(e) => { pick(e.target.files?.[0]); e.target.value = ""; }} />
+            </label>
+            {preview && <button className="btn sm" onClick={() => { void deleteBlob(BACKGROUND_BLOB); set({ backgroundImage: null }); }}>Remove</button>}
+          </div>
+          {preview && (
+            <label className="row small">
+              Darkness
+              <input type="range" min={0} max={0.95} step={0.05} value={s.backgroundDim} onChange={(e) => set({ backgroundDim: Number(e.target.value) })} aria-label="Background darkness" />
+              <span className="mono">{Math.round(s.backgroundDim * 100)}%</span>
+            </label>
+          )}
+          <span className="faint small">Stored only on this device. A dark mask keeps text readable.</span>
+        </div>
+      </div>
+    </Section>
+  );
+}
+
 /* ---------------- GitHub auth (§8) ---------------- */
 
 function GitHubSection() {
@@ -56,7 +133,7 @@ function GitHubSection() {
   const finish = async (token: string, mode: "pat" | "oauth", scopes: string | null) => {
     await setSecret("github-token", token);
     if (isDesktop()) await desktop.keychainSet("github-token", token).catch(() => undefined);
-    set({ authMode: mode });
+    set({ authMode: mode, me: null, githubAvatar: null, myTeams: [], tokenCanWrite: false });
     resetClient();
     try {
       const c = await githubApi();
@@ -64,7 +141,7 @@ function GitHubSection() {
       const teams = await c.viewerTeams();
       const canWrite = mode === "pat" ? true : !!scopes && /public_repo/.test(scopes) && !/(^|[ ,])repo([ ,]|$)/.test(scopes);
       if (scopes && /(^|[ ,])repo([ ,]|$)/.test(scopes)) toast("warn", "This token has classic `repo` scope (private access). Nonlinear never requests it; consider a narrower token.");
-      set({ me: me.login, myTeams: teams, tokenCanWrite: canWrite });
+      set({ me: me.login, githubAvatar: { login: me.login, apiBase: s.apiBase, url: githubAvatarUrl(me.avatar_url), checkedAt: Date.now() }, myTeams: teams, tokenCanWrite: canWrite });
       toast("success", `Signed in as @${me.login}`);
     } catch (e) {
       toast("error", describeError(e));
@@ -91,7 +168,7 @@ function GitHubSection() {
               return;
             }
             await setSecret("github-token", null);
-            set({ authMode: "anonymous", me: null, myTeams: [], tokenCanWrite: false });
+            set({ authMode: "anonymous", me: null, githubAvatar: null, myTeams: [], tokenCanWrite: false });
             resetClient();
             toast("info", "Disconnected. Revoke the token on GitHub if you no longer need it.");
           }}
@@ -104,6 +181,12 @@ function GitHubSection() {
           <input type="checkbox" checked={s.publicOnly} onChange={(e) => { set({ publicOnly: e.target.checked }); resetClient(); }} /> <b>Public-only mode</b>
         </label>
         <span className="faint small">Hides and rejects private repository metadata/content even if a token could access it.</span>
+      </div>
+      <div className="row">
+        <label className="row" style={{ flex: "none", whiteSpace: "nowrap" }}>
+          <input type="checkbox" checked={s.signalReviewStart} onChange={(e) => set({ signalReviewStart: e.target.checked })} /> <b>Show on GitHub when I start reviewing</b>
+        </label>
+        <span className="faint small">On your first review action in a PR (marking lines, a note, or a draft comment), Nonlinear requests a review from you so others see “Awaiting review from @you”. GitHub's pending reviews are private to you, so this is the only visible signal.</span>
       </div>
       <label className="row small">
         API base
@@ -197,6 +280,8 @@ function IntentionsSection() {
         if ("kind" in res && res.kind === "conflict") throw new Error(res.reason);
       } else if (i.kind === "update-body" || i.kind === "labels" || i.kind === "reviewers" || i.kind === "milestone") await updatePRFields(i.prKey, p);
       else if (i.kind === "review") throw new Error("Re-open the PR in Review and submit again; review anchors must be rechecked.");
+      else if (i.kind === "lgtm") await c.submitReview(r.owner, r.repo, r.number, { commit_id: p.commit_id, event: "APPROVE", body: p.body || "LGTM" });
+      else if (i.kind === "review-start") await c.requestReviewers(r.owner, r.repo, r.number, [p.login]);
       put("intentions", i.id, { ...i, status: "sent" });
       toast("success", "Sent");
     } catch (e) {
@@ -612,7 +697,7 @@ function LanguageServersSection() {
       {repos.map((r) => (
         <label key={r} className="row small">
           <span style={{ width: 260 }} className="mono">{r}</span>
-          <input aria-label={`Local working tree for ${r}`} className="input grow mono" placeholder="/Users/me/src/chipyard" value={s.localRepos[r] ?? ""} disabled={!isDesktop()} onChange={(e) => set({ localRepos: { ...s.localRepos, [r]: e.target.value } })} />
+          <input aria-label={`Local working tree for ${r}`} className="input grow mono" placeholder="/path/to/repository" value={s.localRepos[r] ?? ""} disabled={!isDesktop()} onChange={(e) => set({ localRepos: { ...s.localRepos, [r]: e.target.value } })} />
         </label>
       ))}
       {!isDesktop() && <div className="faint small">Language servers and local working trees require the desktop app.</div>}
@@ -642,7 +727,7 @@ function SSHSection() {
       ))}
       <div className="row">
         <input aria-label="SSH alias" className="input" placeholder="ssh alias" value={alias} onChange={(e) => setAlias(e.target.value)} disabled={!isDesktop()} />
-        <input aria-label="Remote working tree root" className="input grow" placeholder="/home/me/chipyard" value={root} onChange={(e) => setRoot(e.target.value)} disabled={!isDesktop()} />
+        <input aria-label="Remote working tree root" className="input grow" placeholder="/path/to/repository" value={root} onChange={(e) => setRoot(e.target.value)} disabled={!isDesktop()} />
         <button className="btn" disabled={!isDesktop() || !/^[A-Za-z0-9_.-]+$/.test(alias) || !root.startsWith("/")} onClick={() => { set({ sshHosts: [...s.sshHosts, { alias, root, allowed: false }] }); setAlias(""); setRoot(""); }}>
           Pair host
         </button>
@@ -654,24 +739,89 @@ function SSHSection() {
 
 function DataSection() {
   const toast = useApp((x) => x.toast);
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [erasing, setErasing] = useState(false);
+  const restore = async (file: File) => {
+    setBusy(true);
+    try {
+      const { restored, skipped } = await restoreBackup(await file.text());
+      toast("success", `Restored ${restored} records${skipped ? `; ${skipped} diff imports lacked patch data` : ""}.`);
+    } catch (error) {
+      toast("error", error instanceof Error ? error.message : "Unable to restore the export.");
+    } finally {
+      setBusy(false);
+    }
+  };
   return (
     <Section title="Local data">
       <div className="row">
-        <button className="btn" onClick={async () => download("nonlinear-export.json", JSON.stringify((await loadAll()).filter((r) => !["prs", "repos", "summaries"].includes(r.collection)), null, 1), "application/json")}>
+        <button className="btn" disabled={busy} onClick={() => void exportBackup()
+          .then((json) => download("nonlinear-export.json", json, "application/json"))
+          .catch((error) => toast("error", String(error)))}>
           Export my data (JSON)
         </button>
-        <button
-          className="btn danger"
-          onClick={async () => {
-            if (!confirm("Delete all local Nonlinear data on this device? Tokens are kept unless you disconnect.")) return;
-            await wipeAll();
-            toast("info", "Local data deleted. Reloading…");
-            setTimeout(() => location.reload(), 500);
-          }}
-        >
-          Delete local data
-        </button>
+        <button className="btn" disabled={busy} onClick={() => input.current?.click()}>{busy ? "Restoring…" : "Import my data (JSON)"}</button>
+        <input ref={input} aria-label="Choose Nonlinear data export" type="file" accept=".json,application/json" hidden onChange={(event) => {
+          const file = event.currentTarget.files?.[0];
+          event.currentTarget.value = "";
+          if (file) void restore(file);
+        }} />
+        <button className="btn danger" onClick={() => setErasing(true)}>Delete local data…</button>
       </div>
+      {erasing && <EraseDialog onClose={() => setErasing(false)} />}
     </Section>
+  );
+}
+
+/** Secret names this app stores (keychain on desktop, IndexedDB on web). */
+function secretKeyNames(): string[] {
+  return ["github-token", "sync-key", "sync-session", "sync-cursor", "nonlinear-selftest", ...PROVIDERS.map((p) => `ai-key:${p.id}`)];
+}
+
+function EraseDialog({ onClose }: { onClose: () => void }) {
+  const [secrets, setSecrets] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const toast = useApp((x) => x.toast);
+  const localRepos = useSettings().localRepos;
+  const desktopApp = isDesktop();
+  const erase = async () => {
+    setBusy(true);
+    try {
+      const report = await eraseEverything({ secretKeys: secrets ? secretKeyNames() : [], localRepos: Object.values(localRepos) });
+      const freed = report.bytes > 0 ? ` · ${(report.bytes / 1024 / 1024).toFixed(1)} MB freed` : "";
+      toast(report.errors.length ? "warn" : "info", report.errors.length ? `Erased, with ${report.errors.length} problem(s): ${report.errors[0]}` : `Everything erased${freed}. Reloading…`);
+      setTimeout(() => location.reload(), report.errors.length ? 2500 : 700);
+    } catch (error) {
+      toast("error", String(error));
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title="Delete all local data" onClose={busy ? () => undefined : onClose}
+      footer={<>
+        <span className="spacer" />
+        <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
+        <button className="btn danger" onClick={() => void erase()} disabled={busy}>{busy ? "Erasing…" : "Erase everything"}</button>
+      </>}>
+      <div className="col">
+        <p style={{ margin: 0 }}>This removes everything Nonlinear keeps on this {desktopApp ? "Mac" : "browser"}:</p>
+        <ul className="small" style={{ margin: 0, paddingLeft: 18, lineHeight: 1.6 }}>
+          <li>Views, releases, pins, cards, review progress, private notes, drafts and settings</li>
+          <li>Cached pull requests, imported diffs, staged safe-mode changes and queued writes</li>
+          <li>Saved release notes and other small preferences kept in browser storage</li>
+          {desktopApp && <li>The database file (shrunk on disk), repository mirrors, checkouts made for review, timeline caches and the app's web cache</li>}
+          {desktopApp && <li>Leftover data from older builds of the app</li>}
+        </ul>
+        <label className="row" style={{ alignItems: "flex-start" }}>
+          <input type="checkbox" checked={secrets} onChange={(e) => setSecrets(e.target.checked)} style={{ marginTop: 3 }} />
+          <span>Also remove saved sign-in tokens and AI API keys {desktopApp ? "from the macOS Keychain" : ""}<br />
+            <span className="faint small">You'll need to sign in to GitHub and Nonlinear Cloud again.</span></span>
+        </label>
+        <div className="faint small">
+          Your own working trees are never touched. Data already synced to Nonlinear Cloud stays there{secrets ? "" : ", and this device downloads it again while it stays connected"}. This can't be undone; export your data first if you might want it back.
+        </div>
+      </div>
+    </Modal>
   );
 }

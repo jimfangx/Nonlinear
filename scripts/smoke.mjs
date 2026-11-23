@@ -49,7 +49,7 @@ if (diffPath) {
 // Board: create a card and move it via keyboard
 await page.goto(base + "/#/board");
 await page.getByRole("button", { name: "+ Card" }).click();
-await page.locator(".modal input").first().fill("BOOM i34 bugfix integration");
+await page.getByRole("textbox", { name: "Title", exact: true }).fill("BOOM iteration 95 integration");
 await page.getByRole("button", { name: "Done" }).click();
 await page.locator(".card").first().focus();
 await page.keyboard.press("Alt+ArrowRight");
@@ -61,6 +61,7 @@ await shot("04-board");
 // Releases: create one
 await page.goto(base + "/#/releases");
 await page.getByRole("button", { name: "+ New release" }).click();
+await page.getByRole("dialog", { name: "New release" }).getByLabel("Name", { exact: true }).fill("Smoke test release");
 await page.getByRole("button", { name: "Create" }).click();
 await page.waitForTimeout(300);
 await shot("05-release");

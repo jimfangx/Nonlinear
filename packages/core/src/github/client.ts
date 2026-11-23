@@ -201,6 +201,10 @@ export class GitHubClient {
     return this.requestText(`/repos/${enc(owner)}/${enc(repo)}/pulls/${n}`, "application/vnd.github.diff");
   }
 
+  commitDiff(owner: string, repo: string, sha: string): Promise<string> {
+    return this.requestText(`/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}`, "application/vnd.github.diff");
+  }
+
   compareDiff(owner: string, repo: string, base: string, head: string): Promise<string> {
     return this.requestText(`/repos/${enc(owner)}/${enc(repo)}/compare/${enc(base)}...${enc(head)}`, "application/vnd.github.diff");
   }
@@ -291,7 +295,13 @@ export class GitHubClient {
     return toCommitNode(await this.request<RawCommit>("GET", `/repos/${enc(owner)}/${enc(repo)}/commits/${enc(sha)}`));
   }
 
-  /** ahead/behind relation between two commits */
+  /** Commits in base...head (GitHub returns at most 250), oldest first, plus the total count. */
+  async compareCommits(owner: string, repo: string, base: string, head: string): Promise<{ commits: RawCommit[]; total: number }> {
+    const r = await this.request<{ commits: RawCommit[]; total_commits: number }>("GET", `/repos/${enc(owner)}/${enc(repo)}/compare/${enc(base)}...${enc(head)}?per_page=250`);
+    return { commits: r.commits ?? [], total: r.total_commits ?? r.commits?.length ?? 0 };
+  }
+
+    /** ahead/behind relation between two commits */
   async compareStatus(owner: string, repo: string, base: string, head: string): Promise<{ status: "ahead" | "behind" | "identical" | "diverged"; ahead_by: number; behind_by: number; merge_base_sha: string | null }> {
     const r = await this.request<{ status: "ahead" | "behind" | "identical" | "diverged"; ahead_by: number; behind_by: number; merge_base_commit?: { sha: string } }>(
       "GET",

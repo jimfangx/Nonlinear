@@ -134,7 +134,7 @@ export function indexPatch(text: string): ParsedPatchIndex {
   const files: DiffFileEntry[] = [];
   const issues: string[] = [];
   let cur: DiffFileEntry | null = null;
-  let pos = 0;
+  let pos: number = 0;
   let inHunk = false;
   let remOld = 0;
   let remNew = 0;
@@ -162,16 +162,25 @@ export function indexPatch(text: string): ParsedPatchIndex {
     const lineStart = pos;
     pos = nl + 1;
 
-    if (line.startsWith("diff --git ")) {
+    const gitHeader = line.startsWith("diff --git ");
+    // A standalone unified patch starts with a ---/+++ pair instead of a Git header.
+    const plainHeader: boolean = line.startsWith("--- ") && (!inHunk || (remOld <= 0 && remNew <= 0)) &&
+      (!cur || cur.hunkCount > 0) && text.startsWith("+++ ", pos);
+    if (gitHeader || plainHeader) {
       finish(lineStart);
-      const h = parseGitHeader(line);
+      const nextEnd: number = plainHeader ? text.indexOf("\n", pos) : -1;
+      const plain: { a: string | null; b: string | null } | null = plainHeader ? {
+        a: stripPrefix(line.slice(4).split("\t")[0]!),
+        b: stripPrefix(text.slice(pos + 4, nextEnd < 0 ? len : nextEnd).split("\t")[0]!),
+      } : null;
+      const h: { a: string | null; b: string | null } | null = plain ?? parseGitHeader(line);
       if (!h) issues.push(`Malformed diff header at offset ${lineStart}`);
       cur = {
         index: files.length,
         oldPath: h?.a ?? null,
         newPath: h?.b ?? null,
         path: h?.b ?? h?.a ?? "(unknown)",
-        kind: "modified",
+        kind: plain?.a === null ? "added" : plain?.b === null ? "deleted" : "modified",
         binary: false,
         gitlink: false,
         oldMode: null,
@@ -203,8 +212,8 @@ export function indexPatch(text: string): ParsedPatchIndex {
 
     if (inHunk) {
       const ch = line[0];
-      if (ch === "+" && remNew > 0) { c.additions++; remNew--; continue; }
-      if (ch === "-" && remOld > 0) { c.deletions++; remOld--; continue; }
+      if (ch === "+" && remNew > 0) { c.gitlink ||= /^\+Subproject commit [0-9a-f]{7,64}(?:-dirty)?$/.test(line); c.additions++; remNew--; continue; }
+      if (ch === "-" && remOld > 0) { c.gitlink ||= /^-Subproject commit [0-9a-f]{7,64}(?:-dirty)?$/.test(line); c.deletions++; remOld--; continue; }
       if ((ch === " " || line === "") && (remOld > 0 || remNew > 0)) { remOld--; remNew--; if (remOld <= 0 && remNew <= 0) { remOld = Math.max(0, remOld); remNew = Math.max(0, remNew); } continue; }
       if (ch === "\\") continue; // "\ No newline at end of file"
       if (remOld > 0 || remNew > 0) {
@@ -225,8 +234,8 @@ export function indexPatch(text: string): ParsedPatchIndex {
     }
     if (line.startsWith("new file mode ")) { c.kind = "added"; c.newMode = line.slice(14).trim(); c.gitlink ||= c.newMode === "160000"; continue; }
     if (line.startsWith("deleted file mode ")) { c.kind = "deleted"; c.oldMode = line.slice(18).trim(); c.path = c.oldPath ?? c.path; c.gitlink ||= c.oldMode === "160000"; continue; }
-    if (line.startsWith("old mode ")) { c.oldMode = line.slice(9).trim(); continue; }
-    if (line.startsWith("new mode ")) { c.newMode = line.slice(9).trim(); if (c.kind === "modified") c.kind = "mode-change"; continue; }
+    if (line.startsWith("old mode ")) { c.oldMode = line.slice(9).trim(); c.gitlink ||= c.oldMode === "160000"; continue; }
+    if (line.startsWith("new mode ")) { c.newMode = line.slice(9).trim(); c.gitlink ||= c.newMode === "160000"; if (c.kind === "modified") c.kind = "mode-change"; continue; }
     if (line.startsWith("similarity index ")) { c.similarity = parseInt(line.slice(17), 10); continue; }
     if (line.startsWith("rename from ")) { c.kind = "renamed"; c.oldPath = unquote(line.slice(12)); continue; }
     if (line.startsWith("rename to ")) { c.kind = "renamed"; c.newPath = unquote(line.slice(10)); c.path = c.newPath; continue; }
@@ -245,7 +254,7 @@ export function indexPatch(text: string): ParsedPatchIndex {
     c.issues.push(`Unrecognised header line "${line.slice(0, 60)}"`);
   }
   finish(len);
-  if (!files.length && text.trim()) issues.push("No diff --git entries found");
+  if (!files.length && text.trim()) issues.push("No unified diff entries found");
 
   let additions = 0, deletions = 0;
   for (const f of files) { additions += f.additions; deletions += f.deletions; }

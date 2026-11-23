@@ -88,6 +88,20 @@ describe("commit graph", () => {
     expect(maxLane).toBe(1);
     expect(rows.find((r) => r.commit.sha === "a")!.lane).toBe(0);
   });
+
+  it("separates compared branches and connects their shared history across the divider", () => {
+    const { rows, dividers } = layoutLanes(commits.slice(1), ["c", "d"]);
+    expect(dividers).toHaveLength(1);
+    const main = rows.find((row) => row.commit.sha === "c")!;
+    const compared = rows.find((row) => row.commit.sha === "d")!;
+    const shared = rows.find((row) => row.commit.sha === "b")!;
+    expect(main.lane).toBeLessThan(dividers[0]!);
+    expect(compared.lane).toBeGreaterThan(dividers[0]!);
+    expect(shared.lane).toBeLessThan(dividers[0]!);
+    expect(compared.edges).toEqual([{ toSha: "b", fromLane: compared.lane, toLane: shared.lane }]);
+    expect(layoutLanes(commits, ["e", "c"]).dividers).toHaveLength(1);
+    expect(layoutLanes(commits, ["e"]).dividers).toEqual([]);
+  });
 });
 
 describe("sync oplog", () => {

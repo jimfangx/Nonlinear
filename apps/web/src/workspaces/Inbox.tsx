@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { NavIcon } from "../components/NavIcon";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { CATEGORY_LABELS, summarizeEvents, classify, isSnoozed, isUnread, newId, type Category, type PRSnapshot } from "@nonlinear/core";
@@ -53,17 +54,6 @@ export function Inbox() {
           </p>
           <button className="btn primary" onClick={() => setEditing(newView())}>
             Create a view
-          </button>
-          <button
-            className="btn"
-            style={{ marginLeft: 8 }}
-            onClick={() => {
-              const v = { ...newView(), name: "Chipyard integration", repos: ["ucb-bar/chipyard", "riscv-boom/riscv-boom", "chipsalliance/rocket-chip", "firesim/firesim"] };
-              useApp.getState().put("views", v.id, v);
-              nav(`/inbox/${v.id}`);
-            }}
-          >
-            Use “Chipyard integration” example
           </button>
         </div>
         {editor}
@@ -134,28 +124,53 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
       repo: (a, b) => a.key.localeCompare(b.key, undefined, { numeric: true }),
     };
     xs.sort((a, b) => Number(!!prLocal[b.key]?.pinned) - Number(!!prLocal[a.key]?.pinned) || sorter[view.sort](a, b));
-    if (view.groupBy === "repo") xs.sort((a, b) => `${a.owner}/${a.repo}`.localeCompare(`${b.owner}/${b.repo}`));
-    if (view.groupBy === "chain") {
-      const comp = new Map<string, string>();
-      for (const p of xs) comp.set(p.key, graph.component(p.key).sort()[0]!);
-      xs.sort((a, b) => comp.get(a.key)!.localeCompare(comp.get(b.key)!));
-    }
     if (requested && activePR && !xs.some((p) => p.key === requested)) xs.unshift(activePR);
     return xs;
-  }, [requested, activePR, viewPRs, cats, cat, q, prLocal, showSnoozed, view.sort, view.groupBy, graph, lensSet]);
+  }, [requested, activePR, viewPRs, cats, cat, q, prLocal, showSnoozed, view.sort, lensSet]);
 
-  const groupOf = (p: PRSnapshot): string | null => {
-    if (view.groupBy === "repo") return `${p.owner}/${p.repo}`;
-    if (view.groupBy === "chain") {
-      const c = graph.component(p.key);
-      return c.length > 1 ? `Chain: ${graph.topoOrder(c).map((k) => k.split("/")[1]).join(" → ")}` : "Unchained";
-    }
+  const groups = useMemo(() => {
+    const groups = new Map<string, { key: string; label: string; prs: PRSnapshot[] }>();
+    const chainGroups = new Map<string, { key: string; label: string }>();
+    const releaseIds = new Map<string, Set<string>>();
     if (view.groupBy === "release") {
-      const rels = Object.values(cards).filter((c) => c.prs.includes(p.key)).flatMap((c) => c.releases);
-      return rels.length ? rels.map((r) => releases[r]?.name ?? r).join(", ") : "No release";
+      for (const card of Object.values(cards)) {
+        if (card.deleted) continue;
+        for (const pr of card.prs) {
+          const ids = releaseIds.get(pr) ?? new Set<string>();
+          for (const id of card.releases) ids.add(id);
+          releaseIds.set(pr, ids);
+        }
+      }
     }
-    return null;
-  };
+    for (const pr of list) {
+      let key: string = view.groupBy;
+      let label = "";
+      if (view.groupBy === "repo") {
+        key = `repo:${pr.owner}/${pr.repo}`;
+        label = `${pr.owner}/${pr.repo}`;
+      } else if (view.groupBy === "chain") {
+        let chain = chainGroups.get(pr.key);
+        if (!chain) {
+          const members = graph.component(pr.key);
+          const order = graph.topoOrder(members);
+          chain = members.length > 1
+            ? { key: `chain:${[...members].sort()[0]}`, label: `Chain · ${order.map((member) => member.split("/").at(-1)).join(" → ")}` }
+            : { key: "chain:unlinked", label: "Unchained" };
+          for (const member of members) chainGroups.set(member, chain);
+        }
+        key = chain.key;
+        label = chain.label;
+      } else if (view.groupBy === "release") {
+        const ids = [...(releaseIds.get(pr.key) ?? [])].sort();
+        key = `release:${ids.join(",")}`;
+        label = ids.length ? ids.map((id) => releases[id]?.name ?? id).join(", ") : "No release";
+      }
+      const group = groups.get(key) ?? { key, label, prs: [] };
+      group.prs.push(pr);
+      groups.set(key, group);
+    }
+    return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
+  }, [list, view.groupBy, cards, graph, releases]);
 
   const refresh = async () => {
     if (!view.repos.length) return;
@@ -176,14 +191,10 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view.id]);
 
-  const entries: ({ group: string } | { pr: PRSnapshot })[] = [];
-  let previousGroup: string | null = null;
-  for (const pr of list) {
-    const group = groupOf(pr);
-    if (group && group !== previousGroup) entries.push({ group });
-    previousGroup = group;
-    if (view.groupBy !== "repo" || !group || !collapsed.has(group)) entries.push({ pr });
-  }
+  const entries = useMemo(() => groups.flatMap((group): ({ group: typeof group } | { pr: PRSnapshot })[] => [
+    ...(group.label ? [{ group }] : []),
+    ...(collapsed.has(group.key) ? [] : group.prs.map((pr) => ({ pr }))),
+  ]), [groups, collapsed]);
 
   const visiblePRs = entries.flatMap((entry) => "pr" in entry ? [entry.pr] : []);
   const focus = visiblePRs.findIndex((p) => p.key === current);
@@ -205,10 +216,12 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
   useEffect(() => {
     if (!activePR) return;
     const { prLocal, put } = useApp.getState();
-    if (view.groupBy === "repo") setCollapsed((old) => {
-      const group = `${activePR.owner}/${activePR.repo}`;
-      if (!old.has(group)) return old;
-      const next = new Set(old); next.delete(group); return next;
+    const group = groups.find((entry) => entry.prs.some((pr) => pr.key === activePR.key));
+    if (group) setCollapsed((old) => {
+      if (!old.has(group.key)) return old;
+      const next = new Set(old);
+      next.delete(group.key);
+      return next;
     });
     put("prLocal", activePR.key, { ...prLocal[activePR.key], lastViewedAt: Date.now(), lastViewedUpdatedAt: activePR.updatedAt });
   }, [activePR?.key]);
@@ -220,13 +233,22 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
   };
 
   const parentRef = useRef<HTMLDivElement>(null);
-  const virt = useVirtualizer({ count: entries.length, getScrollElement: () => parentRef.current, estimateSize: () => 60, overscan: 12 });
+  const virt = useVirtualizer({
+    count: entries.length,
+    getScrollElement: () => parentRef.current,
+    getItemKey: (index) => {
+      const entry = entries[index]!;
+      return "group" in entry ? entry.group.key : entry.pr.key;
+    },
+    estimateSize: (index) => "group" in entries[index]! ? 36 : 46,
+    overscan: 12,
+  });
   const selectedIndex = entries.findIndex((entry) => "pr" in entry && entry.pr.key === current);
   useEffect(() => { if (selectedIndex >= 0) virt.scrollToIndex(selectedIndex, { align: "auto" }); }, [selectedIndex, virt]);
   const newest = Math.max(0, ...viewPRs.map((p) => p.fetchedAt));
 
   const listPane = (
-    <div ref={parentRef} className="inbox-list" aria-label="Pull requests">
+    <div ref={parentRef} className="inbox-list" aria-label="Pull requests" tabIndex={-1}>
       {!list.length && <div className="empty">{viewPRs.length ? "No PRs in this category." : busy ? busy : "No cached PRs yet. Refresh to fetch."}</div>}
       <div style={{ height: virt.getTotalSize(), position: "relative" }}>
         {virt.getVirtualItems().map((vi) => {
@@ -234,26 +256,26 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
           const style = { position: "absolute" as const, top: 0, left: 0, right: 0, transform: `translateY(${vi.start}px)` };
           if ("group" in entry) {
             const group = entry.group;
-            const closed = collapsed.has(group);
-            return <div key={`group:${vi.index}:${group}`} style={style} data-index={vi.index} ref={virt.measureElement}>
-              {view.groupBy === "repo" ? <button className="inbox-group" aria-expanded={!closed} onClick={() => {
+            const closed = collapsed.has(group.key);
+            return <div key={vi.key} style={style} data-index={vi.index} ref={virt.measureElement}>
+              <button className="inbox-group" aria-expanded={!closed} onClick={() => {
                 const next = new Set(collapsed);
-                if (closed) next.delete(group);
+                if (closed) next.delete(group.key);
                 else {
-                  next.add(group);
-                  if (activePR && groupOf(activePR) === group) selectPR(null);
+                  next.add(group.key);
+                  if (group.prs.some((pr) => pr.key === current)) selectPR(null);
                 }
                 setCollapsed(next);
-              }}><span aria-hidden="true">{closed ? "▸" : "▾"}</span> {group}</button> : <h3 className="inbox-group h3">{group}</h3>}
+              }}><span aria-hidden="true">{closed ? "▸" : "▾"}</span> <span className="ellipsis">{group.label}</span><span className="faint">{group.prs.length}</span></button>
             </div>;
           }
           const p = entry.pr;
           const unread = isUnread(p, prLocal[p.key]);
           return (
-            <div key={p.key} style={style} data-index={vi.index} ref={virt.measureElement}>
+            <div key={vi.key} style={style} data-index={vi.index} ref={virt.measureElement}>
               <div
                 aria-current={current === p.key ? "true" : undefined}
-                className={`list-row ${current === p.key ? "selected" : ""} ${current === p.key ? "focused" : ""}`}
+                className={`list-row inbox-pr-row ${current === p.key ? "selected" : ""} ${current === p.key ? "focused" : ""}`}
                 onClick={(e) => {
                   if (e.metaKey || e.ctrlKey || e.shiftKey) {
                     const s = new Set(selected);
@@ -268,7 +290,7 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
                 <span className="dot" style={{ background: unread ? "var(--accent)" : "transparent" }} title={unread ? "Updated since you last viewed" : ""} />
                 <div className="grow" style={{ minWidth: 0 }}>
                   <div className="ellipsis">
-                    {prLocal[p.key]?.pinned && "📌 "}
+                    {prLocal[p.key]?.pinned && <span className="pr-pin-icon" role="img" aria-label="Pinned"><NavIcon name="pin" /></span>}
                     <b style={{ fontWeight: unread ? 600 : 500 }}>{p.title}</b>
                   </div>
                   <div className="faint small ellipsis">
@@ -298,7 +320,7 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
         <button className="btn sm" onClick={onEdit}>
           Edit view
         </button>
-        <input className="input" style={{ width: 240 }} placeholder="Filter PRs…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input className="input" style={{ width: 240 }} data-workspace-search placeholder="Filter PRs…" value={q} onChange={(e) => setQ(e.target.value)} />
         <select className="input" value={view.groupBy} onChange={(e) => patch("views", view.id, { groupBy: e.target.value as RepositoryView["groupBy"] })} aria-label="Group by">
           <option value="none">No grouping</option>
           <option value="repo">Group by repository</option>
@@ -324,10 +346,7 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
         <span className="spacer" />
         {selected.size > 0 && <span className="small muted">{selected.size} selected</span>}
         <button className="btn sm" onClick={() => bulk((k) => put("prLocal", k, { ...prLocal[k], pinned: !prLocal[k]?.pinned }))}>
-          📌 Pin
-        </button>
-        <button className="btn sm" onClick={() => bulk((k) => put("prLocal", k, { ...prLocal[k], snoozedUntil: isSnoozed(prLocal[k]) ? null : Date.now() + 86400_000 }))}>
-          💤 Snooze 1d
+          <NavIcon name="pin" /> Pin
         </button>
         <span className="faint small">{newest ? `fetched ${timeAgo(newest)}` : "never fetched"}</span>
         <button className="btn sm" disabled={!!busy} onClick={() => void refresh()}>
@@ -362,8 +381,26 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
 }
 
 function InboxDetail({ prKey, close }: { prKey: string; close: () => void }) {
-  return <section className="inbox-detail" aria-label="Pull request details">
-    <div className="inbox-detail-header"><span>Pull request details</span><button className="btn ghost sm" onClick={close} aria-label="Close pull request details" title="Close pull request details">✕</button></div>
+  const ref = useRef<HTMLElement>(null);
+  const closeDetail = useCallback(() => {
+    const pane = ref.current;
+    if (pane?.contains(document.activeElement)) {
+      pane.closest(".inbox-layout")?.querySelector<HTMLElement>(".inbox-list")?.focus({ preventScroll: true });
+    }
+    close();
+  }, [close]);
+  useEffect(() => {
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || !ref.current || ref.current.closest("[inert]") ||
+          document.querySelector(".overlay:not([inert])")) return;
+      event.preventDefault();
+      closeDetail();
+    };
+    window.addEventListener("keydown", dismiss);
+    return () => window.removeEventListener("keydown", dismiss);
+  }, [closeDetail]);
+  return <section ref={ref} className="inbox-detail" aria-label="Pull request details">
+    <div className="inbox-detail-header"><span>Pull request details</span><button className="btn ghost sm" onClick={closeDetail} aria-label="Close pull request details" title="Close pull request details">✕</button></div>
     <PRDetail key={prKey} prKey={prKey} />
   </section>;
 }

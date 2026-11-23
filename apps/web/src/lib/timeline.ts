@@ -38,10 +38,10 @@ export interface SubmoduleRow {
 
 const mem = new Map<string, unknown>();
 
-async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
+async function cached<T>(key: string, ttlMs: number, fn: () => Promise<T>, refresh = false): Promise<T> {
   const m = mem.get(key) as { at: number; v: T } | undefined;
-  if (m && Date.now() - m.at < ttlMs) return m.v;
-  const raw = await getBlob(`tlc:${key}`);
+  if (!refresh && m && Date.now() - m.at < ttlMs) return m.v;
+  const raw = refresh ? null : await getBlob(`tlc:${key}`);
   if (raw) {
     const parsed = JSON.parse(raw) as { at: number; v: T };
     if (Date.now() - parsed.at < ttlMs || !navigator.onLine) {
@@ -68,8 +68,8 @@ export function usesGitTransport(source: Source = { kind: "github" }): boolean {
   return base === "https://api.github.com" || (settings.authMode === "oauth" && base === `${cloudUrl()}/gh`);
 }
 
-async function shallowSource(repoKey: string, rev: string, depth: number, trees = false, since?: string) {
-  const [path, ref] = await invoke<[string, string]>("timeline_fetch", { repoKey, rev, depth, trees, since });
+async function shallowSource(repoKey: string, rev: string, depth: number, trees = false, since?: string, refresh = false) {
+  const [path, ref] = await invoke<[string, string]>("timeline_fetch", { repoKey, rev, depth, trees, since, refresh });
   return { source: { kind: "local" as const, path }, ref };
 }
 
@@ -92,14 +92,14 @@ export function remoteGitRefs(repoKey: string): Promise<RemoteRefs> {
   return request;
 }
 
-export async function loadRoot(root: string, ref: string, sha: string | null, src: Source = { kind: "github" }): Promise<RootSnapshot> {
+export async function loadRoot(root: string, ref: string, sha: string | null, src: Source = { kind: "github" }, refresh = false): Promise<RootSnapshot> {
   const [owner, repo] = root.split("/") as [string, string];
   if (usesGitTransport(src)) {
     const local = useApp.getState().settings_().localRepos[root.toLowerCase()];
-    if (local) {
+    if (local && !refresh) {
       try { return await loadRoot(root, ref, sha, { kind: "local", path: local }); } catch { /* use remote Git */ }
     }
-    const { source, ref: fetched } = await shallowSource(root, sha ?? ref, 1, true);
+    const { source, ref: fetched } = await shallowSource(root, sha ?? ref, 1, true, undefined, refresh);
     return { ...await loadRoot(root, fetched, null, source), ref };
   }
   if (src.kind !== "github") {
@@ -110,7 +110,9 @@ export async function loadRoot(root: string, ref: string, sha: string | null, sr
     return { root, ref, commit, gitmodules: parseGitmodules(gm ?? "", { owner, repo }), gitlinks: await gitGitlinks(src, commit.sha) };
   }
   const c = await githubApi();
-  const commit = await cached(`commit:${root}:${sha ?? ref}`, sha ? Infinity : 5 * 60_000, () => c.commit(owner, repo, sha ?? ref));
+  const commitKey = `commit:${root}:${sha ?? ref}`;
+  const readCommit = () => c.commit(owner, repo, sha ?? ref);
+  const commit = await cached(commitKey, sha ? Infinity : 5 * 60_000, readCommit, refresh);
   const gm = await cached(`gitmodules:${root}:${commit.sha}`, Infinity, () => c.contents(owner, repo, ".gitmodules", commit.sha));
   const links = await cached(`gitlinks:${root}:${commit.sha}`, Infinity, async () => [...(await c.gitlinks(owner, repo, commit.sha))]);
   return { root, ref, commit, gitmodules: parseGitmodules(gm ?? "", { owner, repo }), gitlinks: new Map(links) };

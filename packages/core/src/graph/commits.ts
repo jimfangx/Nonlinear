@@ -89,6 +89,8 @@ export interface LaidOutCommit {
   commit: CommitNode;
   row: number;
   lane: number;
+  /** Whether a drawn lane reaches this commit from an earlier row. */
+  hasIncoming?: boolean;
   /** edges to parents: [fromLane, toLane, parentRow|null] */
   edges: { toSha: string; fromLane: number; toLane: number }[];
   /** active lanes passing through this row (for drawing vertical lines) */
@@ -99,37 +101,80 @@ export interface LaidOutCommit {
  * Assign lanes for commits in topological (newest-first) order.
  * Standard algorithm: maintain an array of "expected sha" per lane.
  */
-export function layoutLanes(commitsNewestFirst: CommitNode[]): { rows: LaidOutCommit[]; maxLane: number } {
-  const ordered = topoSortNewestFirst(commitsNewestFirst);
+export function layoutLanes(commits: CommitNode[], branchTips: readonly (string | undefined)[] = []): {
+  rows: LaidOutCommit[];
+  maxLane: number;
+  dividers: number[];
+} {
+  const ordered = topoSortNewestFirst(commits);
+  const comparing = branchTips.length > 1;
+  const owners = new Map<string, number>();
+  if (comparing) {
+    const bySha = new Map(commits.map((commit) => [commit.sha, commit]));
+    branchTips.forEach((tip, group) => {
+      const pending = tip ? [tip] : [];
+      while (pending.length) {
+        const sha = pending.pop()!;
+        if (owners.has(sha)) continue;
+        owners.set(sha, group);
+        pending.push(...(bySha.get(sha)?.parents ?? []));
+      }
+    });
+  }
+
   const lanes: (string | null)[] = [];
+  const laneGroups: number[] = [];
   const rows: LaidOutCommit[] = [];
-  let maxLane = 0;
+  const freeLane = (group: number) => {
+    const free = lanes.findIndex((expected, i) => expected === null && laneGroups[i] === group);
+    if (free >= 0) return free;
+    laneGroups.push(group);
+    lanes.push(null);
+    return lanes.length - 1;
+  };
   ordered.forEach((c, row) => {
-    let lane = lanes.indexOf(c.sha);
-    if (lane < 0) {
-      lane = lanes.indexOf(null);
-      if (lane < 0) lane = lanes.length;
-    }
+    const incoming = lanes.indexOf(c.sha);
+    const group = owners.get(c.sha) ?? 0;
+    const lane = incoming >= 0 ? incoming : freeLane(group);
     // Any other lanes also waiting for this commit converge here.
     for (let i = 0; i < lanes.length; i++) if (i !== lane && lanes[i] === c.sha) lanes[i] = null;
     const passThrough = lanes.map((s, i) => (s && i !== lane ? i : -1)).filter((i) => i >= 0);
     const edges: LaidOutCommit["edges"] = [];
-    lanes[lane] = c.parents[0] ?? null;
-    edges.push(...(c.parents[0] ? [{ toSha: c.parents[0], fromLane: lane, toLane: lane }] : []));
-    for (const p of c.parents.slice(1)) {
-      let pl = lanes.indexOf(p);
-      if (pl < 0) {
-        pl = lanes.indexOf(null);
-        if (pl < 0) pl = lanes.length;
-        lanes[pl] = p;
+    lanes[lane] = comparing ? null : c.parents[0] ?? null;
+    c.parents.forEach((sha, i) => {
+      const parentGroup = owners.get(sha) ?? group;
+      let toLane = comparing || i > 0 ? lanes.indexOf(sha) : lane;
+      if (toLane < 0) {
+        toLane = i === 0 && group === parentGroup ? lane : freeLane(parentGroup);
+        lanes[toLane] = sha;
       }
-      edges.push({ toSha: p, fromLane: lane, toLane: pl });
-    }
-    while (lanes.length && lanes[lanes.length - 1] === null) lanes.pop();
-    maxLane = Math.max(maxLane, lane, ...edges.map((e) => e.toLane));
-    rows.push({ commit: c, row, lane, edges, passThrough });
+      edges.push({ toSha: sha, fromLane: lane, toLane });
+    });
+    rows.push({ commit: c, row, lane, edges, passThrough, hasIncoming: comparing ? incoming >= 0 : undefined });
   });
-  return { rows, maxLane };
+
+  if (!comparing) return { rows, maxLane: Math.max(0, lanes.length - 1), dividers: [] };
+
+  // Keep each branch's lanes contiguous. Shared ancestors belong to the first selected
+  // branch that reaches them, so ancestry can cross a divider without duplicating commits.
+  const positions: number[] = [];
+  const dividers: number[] = [];
+  let offset = 0;
+  branchTips.forEach((_, group) => {
+    if (group) dividers.push(offset - 0.5);
+    let count = 0;
+    laneGroups.forEach((owner, lane) => { if (owner === group) positions[lane] = offset + count++; });
+    offset += Math.max(1, count);
+  });
+  for (const row of rows) {
+    row.lane = positions[row.lane]!;
+    row.passThrough = row.passThrough.map((lane) => positions[lane]!);
+    for (const edge of row.edges) {
+      edge.fromLane = positions[edge.fromLane]!;
+      edge.toLane = positions[edge.toLane]!;
+    }
+  }
+  return { rows, maxLane: offset - 1, dividers };
 }
 
 /** Topological order (children before parents), ties by date desc. */
@@ -162,8 +207,8 @@ export function topoSortNewestFirst(commits: CommitNode[]): CommitNode[] {
 /* Timeline scale                                                      */
 /* ------------------------------------------------------------------ */
 
-export type Zoom = "day" | "week" | "month";
-export const PX_PER_DAY: Record<Zoom, number> = { day: 80, week: 16, month: 4 };
+export type Zoom = "day" | "week" | "month" | "year";
+export const PX_PER_DAY: Record<Zoom, number> = { day: 80, week: 16, month: 4, year: 1 };
 
 export interface TimeScale {
   start: number; // ms
@@ -191,17 +236,21 @@ export function scaleWidth(s: TimeScale): number {
 export function ticks(s: TimeScale, zoom: Zoom): { x: number; label: string }[] {
   const out: { x: number; label: string }[] = [];
   const d = new Date(s.start);
+  const format = new Intl.DateTimeFormat(undefined, zoom === "year"
+    ? { month: "short", year: "numeric", timeZone: "UTC" }
+    : zoom === "month" ? { month: "short", year: "2-digit", timeZone: "UTC" }
+    : { month: "short", day: "numeric", timeZone: "UTC" });
   d.setUTCHours(0, 0, 0, 0);
-  if (zoom === "month") d.setUTCDate(1);
+  if (zoom === "month" || zoom === "year") d.setUTCDate(1);
+  if (zoom === "year") d.setUTCMonth(Math.floor(d.getUTCMonth() / 3) * 3);
   if (zoom === "week") d.setUTCDate(d.getUTCDate() - d.getUTCDay());
   while (d.getTime() <= s.end) {
     if (d.getTime() >= s.start) {
-      const label = zoom === "month" ? d.toLocaleDateString(undefined, { month: "short", year: "2-digit", timeZone: "UTC" }) : d.toLocaleDateString(undefined, { month: "short", day: "numeric", timeZone: "UTC" });
-      out.push({ x: xOf(s, d.getTime()), label });
+      out.push({ x: xOf(s, d.getTime()), label: format.format(d) });
     }
     if (zoom === "day") d.setUTCDate(d.getUTCDate() + 1);
     else if (zoom === "week") d.setUTCDate(d.getUTCDate() + 7);
-    else d.setUTCMonth(d.getUTCMonth() + 1);
+    else d.setUTCMonth(d.getUTCMonth() + (zoom === "year" ? 3 : 1));
   }
   return out;
 }

@@ -145,6 +145,7 @@ List explicit unknowns.`;
 
 export interface PromptInput {
   title: string;
+  url?: string;
   body: string;
   files: { path: string; additions: number; deletions: number; patch?: string; summary?: string }[];
   maxPatchChars: number;
@@ -173,6 +174,7 @@ export function buildOverviewPrompt(inp: PromptInput): { system: string; user: s
   }
   const user = [
     `## PR title (untrusted)\n${inp.title.slice(0, 500)}`,
+    ...(inp.url ? [`GitHub PR: ${inp.url}\nChanges: ${inp.url}/files`] : []),
     `## PR description (untrusted)\n${inp.body.slice(0, 4000)}`,
     `## Changed files by area`,
     ...[...groups].map(([g, fs]) => `- ${g}: ${fs.map((f) => `${f.path} (+${f.additions}/-${f.deletions})${f.summary ? ` — ${f.summary}` : ""}`).join("; ")}`),
@@ -183,11 +185,11 @@ export function buildOverviewPrompt(inp: PromptInput): { system: string; user: s
   return { system: SYSTEM, user, includedPatches: included };
 }
 
-export function buildFilePrompt(path: string, patch: string, maxChars: number): { system: string; user: string; truncated: boolean } {
+export function buildFilePrompt(path: string, patch: string, maxChars: number, prUrl?: string): { system: string; user: string; truncated: boolean } {
   const truncated = patch.length > maxChars;
   return {
     system: SYSTEM,
-    user: `Summarize this single file change in 3-6 bullets (what changed, why it likely matters, risks).\n\n<<<FILE ${path}>>>\n${patch.slice(0, maxChars)}\n<<<END FILE>>>${truncated ? "\n(Patch truncated.)" : ""}`,
+    user: `Summarize this single file change in 3-6 bullets (what changed, why it likely matters, risks).${prUrl ? `\n\nGitHub PR: ${prUrl}\nChanges: ${prUrl}/files` : ""}\n\n<<<FILE ${path}>>>\n${patch.slice(0, maxChars)}\n<<<END FILE>>>${truncated ? "\n(Patch truncated.)" : ""}`,
     truncated,
   };
 }

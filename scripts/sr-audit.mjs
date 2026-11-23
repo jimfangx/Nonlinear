@@ -2,6 +2,7 @@
 // landmarks, headings, accessible names of interactive elements, and Tab-order announcements.
 // Prereqs: app on :4173 and mock GitHub on :4010.
 import { chromium } from "playwright-core";
+import { createMockInboxView } from "./mock-inbox.mjs";
 const APP = process.argv[2] ?? "http://localhost:4173";
 const MOCK = process.argv[3] ?? "http://localhost:4010";
 const browser = await chromium.launch({ executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", headless: true });
@@ -13,8 +14,8 @@ await page.getByPlaceholder("github_pat_…").fill("mock-token");
 await page.getByRole("button", { name: "Save token" }).click();
 await page.getByText("@maintainer").first().waitFor();
 await page.goto(`${APP}/#/inbox`);
-await page.getByRole("button", { name: /Use “Chipyard integration” example/ }).click();
-await page.getByText("Bump BOOM for i34 fix").first().waitFor({ timeout: 15000 });
+await createMockInboxView(page);
+await page.getByText("Bump BOOM for iteration 95").first().waitFor({ timeout: 15000 });
 const views = [["inbox", "#/inbox"], ["review-files", "#/pr/ucb-bar/chipyard/789/files"], ["review-overview", "#/pr/ucb-bar/chipyard/789/overview"], ["board", "#/board"], ["timeline", "#/timeline"], ["releases", "#/releases"], ["diff", "#/diff"], ["graph", "#/graph/ucb-bar/chipyard"], ["settings", "#/settings"]];
 let problems = 0;
 const INTERACTIVE = new Set(["button", "link", "textbox", "combobox", "checkbox", "radio", "slider", "tab", "option", "menuitem", "searchbox", "spinbutton", "switch"]);

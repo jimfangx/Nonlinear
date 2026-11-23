@@ -1,6 +1,11 @@
+import { AskAI, type AskTarget } from "../components/AskAI";
+import { DiffCodeLayoutSelect, useDiffCodeLayout } from "../components/FileDiff";
+import { CommitDiff } from "../components/CommitDiff";
+import { NavIcon } from "../components/NavIcon";
+import { RepositoryShortcuts, useCachedRepositories } from "../components/RepositoryShortcuts";
 import { useShallow } from "zustand/react/shallow";
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   buildOverviewPrompt,
   diffHash,
@@ -18,22 +23,21 @@ import {
   type RawReviewComment,
 } from "@nonlinear/core";
 import { useApp, useSettings } from "../lib/store";
-import { describeError, enrichPR, githubApi, guardedWrite, WriteBlocked, cachedCapabilities } from "../lib/github";
-import { loadPRDiff, remapIfHeadChanged, fileSectionOf, type LoadedDiff } from "../lib/review";
+import { describeError, deferredNotice, enrichPR, githubApi, guardedWrite, WriteBlocked, cachedCapabilities, signalReviewStart, submitLGTM } from "../lib/github";
+import { loadPRDiff, remapIfHeadChanged, fileSectionOf, loadReviewCommits, loadReviewCommitDiff, loadPRConversation, type LoadedDiff } from "../lib/review";
 import { aiAllowedFor, estimate, latestSummary, model, summarize } from "../lib/ai";
 import { renderMarkdown } from "../lib/markdown";
 import { useChainGraph } from "../lib/chains";
 import { useActions } from "../lib/keys";
-import { CIChip, ReviewChip, PRStateChip, timeAgo, Modal } from "../components/ui";
+import { CIChip, ReviewChip, PRStateChip, timeAgo, Modal, DiffStat, Split } from "../components/ui";
 import { ChainPanel } from "../components/ChainPanel";
 import { ReviewFiles } from "./ReviewFiles";
 
 /* ---------------- Entry: repo picker + All/Open/Closed list (§5.1) ---------------- */
 
 export function ReviewHome() {
-  const views = useApp((s) => s.views);
   const prs = useApp((s) => s.prs);
-  const repos = useMemo(() => [...new Set(Object.values(views).flatMap((v) => v.repos))].sort(), [views]);
+  const repos = useCachedRepositories();
   const [repo, setRepo] = useState(repos[0] ?? "");
   const [state, setState] = useState<"open" | "closed" | "all">("open");
   const [busy, setBusy] = useState(false);
@@ -73,6 +77,7 @@ export function ReviewHome() {
             <option key={r}>{r}</option>
           ))}
         </select>
+        <RepositoryShortcuts current={repo || null} repositories={repos} onOpen={setRepo} />
         <div className="row" role="tablist">
           {(["all", "open", "closed"] as const).map((s) => (
             <button key={s} role="tab" aria-selected={state === s} className={`btn sm ${state === s ? "primary" : ""}`} onClick={() => setState(s)}>
@@ -82,7 +87,7 @@ export function ReviewHome() {
         </div>
         {busy && <span className="faint small">Loading…</span>}
         <span className="spacer" />
-        <input className="input" placeholder="Open any PR: owner/repo#123 or URL" value={goto} onChange={(e) => setGoto(e.target.value)} onKeyDown={(e) => {
+        <input className="input" data-workspace-entry data-workspace-search placeholder="Open any PR: owner/repo#123 or URL" value={goto} onChange={(e) => setGoto(e.target.value)} onKeyDown={(e) => {
           if (e.key !== "Enter") return;
           const m = /([^/\s]+)\/([^/\s#]+)(?:#|\/pull\/)(\d+)/.exec(goto);
           if (m) nav(`/review/${m[1]}/${m[2]}/${m[3]}`);
@@ -127,14 +132,33 @@ export function ReviewPR() {
   const { owner, repo, number, tab } = useParams();
   const key = mkKey({ owner: owner!, repo: repo!, number: Number(number) });
   const pr = useApp((s) => s.prs[key]);
-  const progress = useApp((s) => s.reviews[key]);
   const toast = useApp((s) => s.toast);
   const nav = useNavigate();
   const [diff, setDiff] = useState<LoadedDiff | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [commentRevision, setCommentRevision] = useState(0);
+  const [ask, setAsk] = useState<{ target: AskTarget; id: number } | null>(null);
+  const [askDocked, setAskDocked] = useState(false);
+  const [askVisible, setAskVisible] = useState(false);
+  const [askDock, setAskDock] = useState<HTMLDivElement | null>(null);
+  const openAsk = (target: AskTarget) => {
+    setAsk((current) => {
+      if (current && current.target.path === target.path && current.target.selected === target.selected && current.target.context === target.context) return current;
+      return { target, id: (current?.id ?? 0) + 1 };
+    });
+    if (!ask || ask.target.path !== target.path || ask.target.selected !== target.selected || ask.target.context !== target.context) setAskDocked(false);
+    setAskVisible(true);
+  };
   const [remapInfo, setRemapInfo] = useState<string | null>(null);
-  const activeTab = (tab as Tab) ?? "files";
+  const location = useLocation();
+  const tabs: Tab[] = ["overview", "files", "commits", "conversation"];
+  const saved = localStorage.getItem(`nl:review-tab:${key}`);
+  const activeTab = tabs.find((value) => value === (tab ?? saved)) ?? "files";
+  useEffect(() => {
+    if (!pr) return;
+    localStorage.setItem(`nl:review-tab:${key}`, activeTab);
+    localStorage.setItem("nl:last-review", `/review/${pr.owner}/${pr.repo}/${pr.number}/${activeTab}`);
+  }, [key, activeTab, pr]);
   const { graph } = useChainGraph();
 
   useEffect(() => {
@@ -182,11 +206,11 @@ export function ReviewPR() {
   const crumbs: string[] = JSON.parse(sessionStorage.getItem("nl:crumbs") ?? "[]").filter((c: string) => c !== key);
 
   if (!pr) return <div className="empty">{err ?? "Loading PR…"}</div>;
-  const paused = progress?.phase === "paused";
 
   return (
     <div className="col" style={{ height: "100%", gap: 0 }}>
       <div className="toolbar">
+        <Link className="btn ghost sm" to="/review">← Reviews</Link>
         {crumbs.length > 0 && (
           <span className="small faint">
             {crumbs.slice(-3).map((c) => {
@@ -220,36 +244,26 @@ export function ReviewPR() {
             </button>
           </span>
         )}
-        <button
-          className={`btn sm ${paused ? "primary" : ""}`}
-          onClick={() => {
-            const st = useApp.getState();
-            const cur = st.reviews[key] ?? { prKey: key, headSha: pr.headSha, baseSha: pr.baseSha, phase: "active" as const, files: {}, updatedAt: Date.now() };
-            st.put("reviews", key, { ...cur, phase: paused ? "active" : "paused", updatedAt: Date.now() });
-          }}
-          aria-pressed={paused}
-          title="Record that you are stepping away. Your review progress and GitHub status stay as they are."
-        >
-          {paused ? "▶ Resume review" : "⏸ Pause review"}
-        </button>
+        <ReviewingChip pr={pr} />
         <PRNotesButton pr={pr} />
         <button className="btn sm" onClick={() => nav(`/review/${owner}/${repo}/${number}/conversation`)}>PR comment</button>
-        <SubmitReviewButton pr={pr} onSubmitted={() => setCommentRevision((revision) => revision + 1)} />
+        <LGTMButton pr={pr} />
+        <SubmitReviewButton pr={pr} onSubmitted={() => setCommentRevision(Date.now())} />
+        {ask && askDocked && <button className="btn sm" aria-pressed={askVisible} onClick={() => setAskVisible(!askVisible)}>AI chat</button>}
         <a className="btn sm" href={pr.url} target="_blank" rel="noreferrer">
           GitHub ↗
         </a>
-        <button className="btn sm" onClick={() => void enrichPR(key).then(() => toast("info", "Refreshed")).catch((e) => toast("error", describeError(e)))}>
+        <button className="btn sm" onClick={() => void enrichPR(key).then(() => { setCommentRevision(Date.now()); toast("info", "Refreshed"); }).catch((e) => toast("error", describeError(e)))}>
           ↻
         </button>
       </div>
       <div className="tabs" role="tablist">
-        {(["overview", "files", "commits", "conversation"] as Tab[]).map((t) => (
+        {tabs.map((t) => (
           <button key={t} role="tab" aria-selected={activeTab === t} className={`tab ${activeTab === t ? "active" : ""}`} onClick={() => nav(`/review/${owner}/${repo}/${number}/${t}`)}>
             {t === "files" ? `Files changed ${diff ? diff.index.files.length : ""}` : t[0]!.toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
-      {paused && <div className="banner info" role="status">Review paused. Your progress is saved locally.</div>}
       {remapInfo && (
         <div className="banner warn" style={{ margin: 8 }}>
           {remapInfo}{" "}
@@ -259,14 +273,56 @@ export function ReviewPR() {
         </div>
       )}
       {err && <div className="banner err" style={{ margin: 8 }}>{err}</div>}
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div className="review-workspace-body">
+        <Split id="review-ai" className="workspace-split" initial={0.70} min={0.19} showSecond={askDocked && askVisible}>
+          <div style={{ height: "100%", minHeight: 0 }}>
         {activeTab === "overview" && <Overview pr={pr} diff={diff} />}
-        {activeTab === "files" && (diff ? <ReviewFiles pr={pr} diff={diff} refreshComments={commentRevision} /> : <div className="empty">{err ? "" : "Loading diff…"}</div>)}
+        {activeTab === "files" && (diff ? <ReviewFiles pr={pr} diff={diff} refreshComments={commentRevision} focusSearch={location.state?.focusReviewSearch === true} onAsk={openAsk} /> : <div className="empty">{err ? "" : "Loading diff…"}</div>)}
         {activeTab === "commits" && <Commits pr={pr} />}
-        {activeTab === "conversation" && <Conversation pr={pr} />}
+        {activeTab === "conversation" && <Conversation pr={pr} revision={commentRevision} />}
+          </div>
+          <div ref={setAskDock} className="review-ask-dock" />
+        </Split>
       </div>
+      {ask && <AskAI key={ask.id} target={ask.target} docked={askDocked} dock={askDock}
+        onDock={() => { setAskDocked(true); setAskVisible(true); }}
+        onClose={() => { if (askDocked) setAskVisible(false); else setAsk(null); }} />}
     </div>
   );
+}
+
+/** Shows whether GitHub knows you're reviewing; lets you signal it explicitly. */
+function ReviewingChip({ pr }: { pr: PRSnapshot }) {
+  const signalled = useApp((s) => !!s.reviewSignals[pr.key]);
+  const me = useSettings().me;
+  if (!me || pr.author.toLowerCase() === me.toLowerCase() || pr.state !== "open") return null;
+  const listed = pr.requestedReviewers?.some((u) => u.toLowerCase() === me.toLowerCase()) || pr.reviews?.some((r) => r.user.toLowerCase() === me.toLowerCase());
+  if (signalled || listed) return <span className="chip info" title="GitHub lists you as a reviewer on this PR">👀 Reviewing</span>;
+  return <button className="btn sm" title="Request a review from yourself so GitHub shows you're reviewing" onClick={() => void signalReviewStart(pr, { force: true })}>👀 Start review</button>;
+}
+
+/** One-click approval with an "LGTM" review on GitHub. */
+function LGTMButton({ pr }: { pr: PRSnapshot }) {
+  const me = useSettings().me;
+  const toast = useApp((s) => s.toast);
+  const [busy, setBusy] = useState(false);
+  const mine = !!me && pr.author.toLowerCase() === me.toLowerCase();
+  const approved = !!me && pr.reviews?.some((r) => r.user.toLowerCase() === me.toLowerCase() && r.state === "APPROVED");
+  return <button className={`btn sm ${approved ? "ok-btn" : ""}`} disabled={busy || mine || pr.state !== "open"} aria-pressed={approved}
+    title={mine ? "You can't approve your own pull request" : approved ? "You approved this PR on GitHub. Click to approve again on the current head." : "Approve on GitHub with an “LGTM” review"}
+    onClick={async () => {
+      setBusy(true);
+      try {
+        const res = await submitLGTM(pr);
+        const notice = deferredNotice(res, "LGTM approval");
+        if (notice) toast("warn", notice);
+        else { toast("success", `Approved ${pr.key} on GitHub (LGTM)`); void enrichPR(pr.key); }
+      } catch (e) {
+        toast("error", e instanceof WriteBlocked ? e.message : describeError(e));
+      } finally {
+        setBusy(false);
+      }
+    }}>{approved ? "✓ LGTM'd" : "👍 LGTM"}</button>;
 }
 
 function PRNotesButton({ pr }: { pr: PRSnapshot }) {
@@ -283,7 +339,10 @@ function PRNotesButton({ pr }: { pr: PRSnapshot }) {
     <button className="btn sm" onClick={() => setOpen(true)}>PR notes{notes.length ? ` (${notes.length})` : ""}</button>
     {open && <Modal title="Private PR notes" onClose={() => setOpen(false)}>
       <div className="col">
-        {notes.map((note) => <div key={note.id} className="panel pad inline-annotation">{note.body}</div>)}
+        {notes.map((note) => <div key={note.id} className="panel pad inline-annotation row" style={{ alignItems: "flex-start" }}>
+          <span className="grow" style={{ whiteSpace: "pre-wrap" }}>{note.body}</span>
+          <button className="btn ghost sm" aria-label="Delete note" title="Delete note" onClick={() => useApp.getState().remove("notes", note.id)}><NavIcon name="trash" /></button>
+        </div>)}
         <textarea className="input" aria-label="PR-level private note" placeholder="Private note about this pull request" value={body} onChange={(e) => setBody(e.target.value)} />
         <button className="btn primary" disabled={!body.trim()} onClick={save}>Save PR note</button>
       </div>
@@ -333,9 +392,26 @@ function Overview({ pr, diff }: { pr: PRSnapshot; diff: LoadedDiff | null }) {
             <p className="faint small">Private to you. Never shown on GitHub and never an approval.</p>
           </section>
           <section className="panel pad small">
-            <h3 className="h3">Stats</h3>
-            +{pr.additions} −{pr.deletions} in {pr.changedFiles} files · head <span className="mono">{pr.headSha.slice(0, 8)}</span> · base <span className="mono">{pr.baseSha.slice(0, 8)}</span>
-            {settings.me && <div>Signed in as @{settings.me}</div>}
+            <div className="row" style={{ marginBottom: 8 }}>
+              <h3 className="h3 grow" style={{ margin: 0 }}>Stats</h3>
+              <DiffStat additions={pr.additions} deletions={pr.deletions} />
+            </div>
+            <div className="review-stats">
+              <div className="review-stat add"><b>+{pr.additions.toLocaleString()}</b><span>Additions</span></div>
+              <div className="review-stat del"><b>−{pr.deletions.toLocaleString()}</b><span>Deletions</span></div>
+              <div className="review-stat"><b>{pr.changedFiles.toLocaleString()}</b><span>Files</span></div>
+            </div>
+            {pr.additions + pr.deletions > 0 && (
+              <div className="review-stat-bar" title={`${Math.round(pr.additions / (pr.additions + pr.deletions) * 100)}% additions`}>
+                <span className="a" style={{ width: `${pr.additions / (pr.additions + pr.deletions) * 100}%` }} />
+                <span className="d" style={{ width: `${pr.deletions / (pr.additions + pr.deletions) * 100}%` }} />
+              </div>
+            )}
+            <dl className="review-stat-meta">
+              <dt>Head</dt><dd><a className="mono" href={`https://github.com/${pr.headRepo ?? `${pr.owner}/${pr.repo}`}/commit/${pr.headSha}`} target="_blank" rel="noreferrer">{pr.headSha.slice(0, 8)}</a></dd>
+              <dt>Base</dt><dd><a className="mono" href={`https://github.com/${pr.owner}/${pr.repo}/commit/${pr.baseSha}`} target="_blank" rel="noreferrer">{pr.baseSha.slice(0, 8)}</a></dd>
+              {settings.me && <><dt>You</dt><dd>@{settings.me}</dd></>}
+            </dl>
           </section>
         </div>
       </div>
@@ -362,7 +438,7 @@ function AISummary({ pr, diff }: { pr: PRSnapshot; diff: LoadedDiff | null }) {
       const fs = latestSummary(pr.key, f.path);
       return { path: f.path, additions: f.additions, deletions: f.deletions, patch: f.generated ? undefined : fileSectionOf(diff, f), summary: fs?.text.split("\n")[0] };
     });
-    return buildOverviewPrompt({ title: pr.title, body: pr.body ?? "", files, maxPatchChars: 60_000 });
+    return buildOverviewPrompt({ url: pr.url, title: pr.title, body: pr.body ?? "", files, maxPatchChars: 60_000 });
   };
 
   const run = async (modelId: string) => {
@@ -451,48 +527,59 @@ function AISummary({ pr, diff }: { pr: PRSnapshot; diff: LoadedDiff | null }) {
 function Commits({ pr }: { pr: PRSnapshot }) {
   const [commits, setCommits] = useState<CommitNode[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [selected, setSelected] = useState<CommitNode | null>(null);
   useEffect(() => {
-    const r = parsePRKey(pr.key)!;
-    githubApi()
-      .then((c) => c.listPullCommits(r.owner, r.repo, r.number))
-      .then((cs) => setCommits(cs.map((c) => ({ sha: c.sha, parents: c.parents.map((p) => p.sha), committedAt: c.commit.committer?.date ?? "", author: c.author?.login ?? c.commit.author?.name ?? "?", message: c.commit.message }))))
-      .catch((e) => setErr(describeError(e)));
+    let live = true;
+    setErr(null);
+    void loadReviewCommits(pr).then((items) => { if (live) setCommits(items); }).catch((error) => { if (live) setErr(describeError(error)); });
+    return () => { live = false; };
   }, [pr.key, pr.headSha]);
   if (err) return <div className="banner err" style={{ margin: 12 }}>{err}</div>;
   if (!commits) return <div className="empty">Loading…</div>;
-  return (
-    <div className="page">
-      <table className="grid">
-        <tbody>
-          {commits.map((c) => (
-            <tr key={c.sha}>
-              <td className="mono">{c.sha.slice(0, 8)}</td>
-              <td>{c.message.split("\n")[0]}</td>
-              <td className="muted">{c.author}</td>
-              <td className="faint">{timeAgo(c.committedAt)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+  return <div className="page">
+    <div className="review-commits" aria-label="Pull request commits">
+      {commits.map((commit) => <div className="review-commit" key={commit.sha}>
+        <button type="button" className="btn ghost review-commit-row" aria-expanded={selected?.sha === commit.sha} onClick={() => setSelected(selected?.sha === commit.sha ? null : commit)}>
+          <span className="mono">{commit.sha.slice(0, 8)}</span><span className="grow ellipsis">{commit.message.split("\n")[0]}</span>
+          <span className="muted ellipsis">{commit.author}</span><span className="faint">{timeAgo(commit.committedAt)}</span>
+        </button>
+        {selected?.sha === commit.sha && <CommitPeek pr={pr} commit={commit} onClose={() => setSelected(null)} />}
+      </div>)}
     </div>
-  );
+    {!commits.length && <div className="empty">No commits.</div>}
+  </div>;
+}
+
+function CommitPeek({ pr, commit, onClose }: { pr: PRSnapshot; commit: CommitNode; onClose: () => void }) {
+  const [layout, setLayout] = useDiffCodeLayout("nl:review-fit", "scroll");
+  const [patch, setPatch] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    void loadReviewCommitDiff(pr, commit.sha).then((text) => { if (live) setPatch(text); }).catch((err) => { if (live) setError(describeError(err)); });
+    return () => { live = false; };
+  }, [pr.key, commit.sha]);
+  return <section className="panel commit-peek" aria-label="Commit changes" onKeyDown={(event) => { if (event.key === "Escape") onClose(); }}>
+    <div className="toolbar small"><span className="grow">Commit changes</span><DiffCodeLayoutSelect layout={layout} onChange={setLayout} /><button className="btn ghost sm" aria-label="Close commit changes" onClick={onClose}><NavIcon name="close" /></button></div>
+    {patch !== null ? <CommitDiff text={patch} layout={layout} /> : <div className={error ? "banner err" : "empty"}>{error ?? "Loading changes…"}</div>}
+  </section>;
 }
 
 /* ---------------- Conversation ---------------- */
 
 type Event = { at: string; kind: "comment" | "review" | "inline"; user: string; body: string; url: string; extra?: string };
 
-function Conversation({ pr }: { pr: PRSnapshot }) {
+function Conversation({ pr, revision }: { pr: PRSnapshot; revision: number }) {
   const [events, setEvents] = useState<Event[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [text, setText] = useState("");
   const toast = useApp((s) => s.toast);
   const r = parsePRKey(pr.key)!;
   const canReview = cachedCapabilities(`${r.owner}/${r.repo}`.toLowerCase()).has("can-review");
-  const load = async () => {
+  const load = async (refreshAfter = 0) => {
+    setErr(null);
     try {
-      const c = await githubApi();
-      const [ic, rv, rc] = await Promise.all([c.listIssueComments(r.owner, r.repo, r.number), c.listReviews(r.owner, r.repo, r.number), c.listReviewComments(r.owner, r.repo, r.number)]);
+      const [ic, rv, rc] = await loadPRConversation(pr, refreshAfter);
       const ev: Event[] = [
         ...ic.map((x: RawIssueComment) => ({ at: x.created_at, kind: "comment" as const, user: x.user?.login ?? "?", body: x.body, url: x.html_url })),
         ...rv.filter((x: RawReview) => x.body || x.state !== "COMMENTED").map((x: RawReview) => ({ at: x.submitted_at ?? "", kind: "review" as const, user: x.user?.login ?? "?", body: x.body, url: x.html_url, extra: x.state })),
@@ -504,9 +591,8 @@ function Conversation({ pr }: { pr: PRSnapshot }) {
     }
   };
   useEffect(() => {
-    void load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pr.key]);
+    void load(revision);
+  }, [pr.key, pr.headSha, revision]);
   return (
     <div className="page" style={{ maxWidth: 900 }}>
       {err && <div className="banner err">{err}</div>}
@@ -536,10 +622,11 @@ function Conversation({ pr }: { pr: PRSnapshot }) {
             onClick={async () => {
               try {
                 const res = await guardedWrite(pr.key, "can-review", "comment", { body: text }, async () => (await githubApi()).createIssueComment(r.owner, r.repo, r.number, text));
-                if ("queued" in (res as object)) toast("warn", "Offline: comment queued for confirmation");
+                const notice = deferredNotice(res, "Comment");
+                if (notice) toast("warn", notice);
                 else toast("success", "Comment posted to GitHub");
                 setText("");
-                void load();
+                void load(Date.now());
               } catch (e) {
                 toast("error", e instanceof WriteBlocked ? e.message : describeError(e));
               }
@@ -587,15 +674,21 @@ function SubmitReviewButton({ pr, onSubmitted }: { pr: PRSnapshot; onSubmitted: 
                   setBusy(true);
                   try {
                     const valid = drafts.filter((d) => d.headSha === pr.headSha);
-                    const res = await guardedWrite(pr.key, "can-review", "review", { event, body, drafts: valid.map((d) => d.id) }, async () =>
-                      (await githubApi()).submitReview(r.owner, r.repo, r.number, {
-                        commit_id: pr.headSha,
-                        event,
-                        body: body || undefined,
-                        comments: valid.map((d) => ({ path: d.path, line: d.line, side: d.side, ...(d.startLine && d.startLine !== d.line ? { start_line: d.startLine, start_side: d.side } : {}), body: d.body })),
-                      }),
+                    const request = {
+                      commit_id: pr.headSha,
+                      event,
+                      body: body || undefined,
+                      comments: valid.map((d) => ({ path: d.path, line: d.line, side: d.side, ...(d.startLine && d.startLine !== d.line ? { start_line: d.startLine, start_side: d.side } : {}), body: d.body })),
+                    };
+                    const res = await guardedWrite(pr.key, "can-review", "review", { event, body, comments: request.comments, drafts: valid.map((d) => d.id), request }, async () =>
+                      (await githubApi()).submitReview(r.owner, r.repo, r.number, request),
                     );
-                    if ("queued" in (res as object)) toast("warn", "Offline: review queued for confirmation");
+                    if (res && typeof res === "object" && "staged" in res) {
+                      // The staged review carries these comments now; don't keep a second local copy.
+                      valid.forEach((d) => remove("drafts", d.id));
+                      toast("warn", deferredNotice(res, "Review")!);
+                      setOpen(false);
+                    } else if (res && typeof res === "object" && "queued" in res) toast("warn", deferredNotice(res, "Review")!);
                     else {
                       valid.forEach((d) => remove("drafts", d.id));
                       toast("success", "Review submitted to GitHub");

@@ -86,3 +86,40 @@ describe("unified diff edge cases", () => {
     expect(d.issues.join()).toMatch(/unsafe/);
   });
 });
+
+
+it("indexes a standalone unified patch against its root repository", () => {
+  const text = [
+    "--- a/main.ts", "+++ b/main.ts", "@@ -1 +1 @@", "-let v = 0;", "+let v = 1;",
+    "--- /dev/null", "+++ b/extra.ts", "@@ -0,0 +1 @@", "+const x = 1;",
+  ].join("\n") + "\n";
+  const root = { owner: "org", repo: "project", url: "https://github.com/org/project" };
+  const diff = importMultiRepoDiff(text, { format: "unified", rootRepo: root });
+  expect(diff.groups[0]?.repo).toEqual(root);
+  expect(diff.groups[0]?.index.files.map(({ path, kind }) => [path, kind]))
+    .toEqual([["main.ts", "modified"], ["extra.ts", "added"]]);
+  expect(diff.totals).toEqual({ files: 2, additions: 2, deletions: 1 });
+});
+
+describe("unified submodule patches", () => {
+  it("indexes a gitlink and child files from git diff --submodule=diff", () => {
+    const text = [
+      "Submodule engines/sim 1234567..abcdef0:",
+      "diff --git a/engines/sim/src/test.py b/engines/sim/src/test.py",
+      "--- a/engines/sim/src/test.py",
+      "+++ b/engines/sim/src/test.py",
+      "@@ -1 +1 @@",
+      "-old = 1",
+      "+new = 1",
+    ].join("\n");
+    const diff = importMultiRepoDiff(text, { format: "unified" });
+    expect(diff.groups.map((group) => [group.path, group.index.files.map((file) => [file.path, file.kind])]))
+      .toEqual([["", [["engines/sim", "submodule"]]], ["engines/sim", [["src/test.py", "modified"]]]]);
+    expect(fileSection(diff.groups[0]!, diff.groups[0]!.index.files[0]!)).toContain("+Subproject commit abcdef0");
+  });
+
+  it("recognizes a bare Subproject commit hunk without mode metadata", () => {
+    const diff = importMultiRepoDiff("--- a/child\n+++ b/child\n@@ -1 +1 @@\n-Subproject commit 1234567\n+Subproject commit abcdef0\n", { format: "unified" });
+    expect(diff.groups[0]!.index.files[0]!.kind).toBe("submodule");
+  });
+});

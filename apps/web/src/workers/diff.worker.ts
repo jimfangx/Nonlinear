@@ -8,7 +8,7 @@
 import { importMultiRepoDiff, type MultiRepoDiff } from "@nonlinear/core";
 import { spillImport } from "../lib/importStore";
 
-export type WorkerIn = { kind: "import"; file?: File; text?: string; name: string; submodules?: [string, { owner: string; repo: string; url: string }][] };
+export type WorkerIn = { kind: "import"; file?: File; text?: string; name: string; root?: string; rootRef?: string; submodules?: [string, { owner: string; repo: string; url: string }][] };
 export type WorkerOut =
   | { kind: "progress"; done: number; total: number; path: string }
   | { kind: "done"; diff: MultiRepoDiff; ms: number }
@@ -18,12 +18,17 @@ const post = (m: WorkerOut) => (self as unknown as Worker).postMessage(m);
 
 self.onmessage = async (e: MessageEvent<WorkerIn>) => {
   const t0 = performance.now();
-  const { file, name, submodules } = e.data;
+  const { file, name, root, rootRef, submodules } = e.data;
   try {
     let text: string | null = e.data.text ?? (file ? await file.text() : null);
     if (text === null) throw new Error("No input");
+    const key = /^[^/\s]+\/[^/\s]+$/.test(root ?? "") ? root! : undefined;
+    const [owner, repo] = key?.split("/") ?? [];
     const full = importMultiRepoDiff(text, {
       name,
+      format: /\.(?:diff|patch)$/i.test(name) ? "unified" : undefined,
+      rootRef,
+      rootRepo: owner && repo ? { owner, repo, url: `https://github.com/${key}` } : undefined,
       submodules: submodules ? new Map(submodules) : undefined,
       onProgress: (done, total, path) => post({ kind: "progress", done, total, path }),
     });

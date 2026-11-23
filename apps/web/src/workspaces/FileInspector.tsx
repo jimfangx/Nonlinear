@@ -1,3 +1,4 @@
+import { CodeText } from "../components/CodeText";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { breadcrumbs, outline, parseFileHunks, parsePRKey, type DiffFileEntry, type PRSnapshot } from "@nonlinear/core";
@@ -19,10 +20,11 @@ interface PaneSource {
  * another changed file, an arbitrary file at the PR revision, or a file in a
  * related upstream repository. Repo + SHA shown above each pane.
  */
-export function FileInspector({ pr, diff, file, onClose }: { pr: PRSnapshot; diff: LoadedDiff; file: DiffFileEntry; onClose: () => void }) {
+export function FileInspector({ pr, diff, file, onClose, at }: { pr: PRSnapshot; diff: LoadedDiff; file: DiffFileEntry; onClose: () => void; at?: { path: string; line: number } }) {
   const r = parsePRKey(pr.key)!;
   const [headOwner, headRepo] = (pr.headRepo ?? `${r.owner}/${r.repo}`).split("/") as [string, string];
-  const primary: PaneSource = { owner: headOwner, repo: headRepo, sha: pr.headSha, path: file.path };
+  const primary: PaneSource = { owner: headOwner, repo: headRepo, sha: pr.headSha, path: at?.path ?? file.path };
+  const primaryFile = diff.index.files.find((f) => f.path === primary.path);
   const [second, setSecond] = useState<PaneSource | null>(null);
   const [vertical, setVertical] = useState(false);
   const [pick, setPick] = useState("");
@@ -35,9 +37,9 @@ export function FileInspector({ pr, diff, file, onClose }: { pr: PRSnapshot; dif
 
   const changedLines = useMemo(() => {
     const s = new Set<number>();
-    for (const h of parseFileHunks(diff.text.slice(file.start, file.end))) for (const l of h.lines) if (l.kind === "add" && l.newNo) s.add(l.newNo);
+    if (primaryFile) for (const h of parseFileHunks(diff.text.slice(primaryFile.start, primaryFile.end))) for (const l of h.lines) if (l.kind === "add" && l.newNo) s.add(l.newNo);
     return s;
-  }, [diff, file]);
+  }, [diff, primaryFile]);
 
   return (
     <div className="overlay" style={{ padding: 16, alignItems: "stretch" }}>
@@ -47,7 +49,7 @@ export function FileInspector({ pr, diff, file, onClose }: { pr: PRSnapshot; dif
           <input
             className="input"
             style={{ width: 360 }}
-            placeholder="Split with: path | owner/repo@sha:path"
+            data-workspace-entry placeholder="Split with: path | owner/repo@sha:path"
             value={pick}
             onChange={(e) => setPick(e.target.value)}
             onKeyDown={(e) => {
@@ -80,11 +82,11 @@ export function FileInspector({ pr, diff, file, onClose }: { pr: PRSnapshot; dif
         <div style={{ flex: 1, minHeight: 0 }}>
           {second ? (
             <Split id={`inspector-${vertical ? "v" : "h"}`} vertical={vertical} initial={0.5}>
-              <FilePaneView src={primary} changed={changedLines} onOpen={setSecond} />
+              <FilePaneView src={primary} changed={changedLines} onOpen={setSecond} initialLine={at?.line} />
               <FilePaneView src={second} changed={new Set()} onOpen={setSecond} />
             </Split>
           ) : (
-            <FilePaneView src={primary} changed={changedLines} onOpen={setSecond} />
+            <FilePaneView src={primary} changed={changedLines} onOpen={setSecond} initialLine={at?.line} />
           )}
         </div>
       </div>
@@ -92,7 +94,7 @@ export function FileInspector({ pr, diff, file, onClose }: { pr: PRSnapshot; dif
   );
 }
 
-function FilePaneView({ src, changed, onOpen }: { src: PaneSource; changed: Set<number>; onOpen: (s: PaneSource) => void }) {
+function FilePaneView({ src, changed, onOpen, initialLine }: { src: PaneSource; changed: Set<number>; onOpen: (s: PaneSource) => void; initialLine?: number }) {
   const [lines, setLines] = useState<string[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [q, setQ] = useState("");
@@ -135,6 +137,10 @@ function FilePaneView({ src, changed, onOpen }: { src: PaneSource; changed: Set<
     setCur(i);
     virt.scrollToIndex(i, { align: "center" });
   };
+  useEffect(() => {
+    if (lines && initialLine != null) requestAnimationFrame(() => jump(Math.min(initialLine, lines.length - 1)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lines, initialLine]);
   const crumbs = lines ? breadcrumbs(lines, cur) : [];
   return (
     <div className="col" style={{ height: "100%", gap: 0 }}>
@@ -151,7 +157,7 @@ function FilePaneView({ src, changed, onOpen }: { src: PaneSource; changed: Set<
         <button className="btn sm" disabled={!avail.ok || lspBusy} title={avail.ok ? `${avail.server.name}: references` : avail.reason} onClick={() => void runLsp("references")}>
           References
         </button>
-        <input className="input" style={{ width: 160 }} placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && hits.length && jump(hits.find((h) => h > cur) ?? hits[0]!)} />
+        <input className="input" style={{ width: 160 }} data-workspace-search placeholder="Search" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && hits.length && jump(hits.find((h) => h > cur) ?? hits[0]!)} />
         {q && <span className="faint">{hits.length} hits</span>}
         {changedSorted.length > 0 && (
           <button className="btn sm" onClick={() => jump((changedSorted.find((l) => l - 1 > cur) ?? changedSorted[0]!) - 1)}>
@@ -196,12 +202,16 @@ function FilePaneView({ src, changed, onOpen }: { src: PaneSource; changed: Set<
                 return (
                   <div key={i} data-l={i} className={`dl ${changed.has(i + 1) ? "add" : ""} ${i === cur ? "sel" : ""}`} style={{ gridTemplateColumns: "56px 1fr", position: "absolute", top: 0, left: 0, right: 0, transform: `translateY(${vi.start}px)` }} onClick={() => setCur(i)} onDoubleClick={() => {
                       const sel = window.getSelection();
-                      const off = sel && sel.anchorNode && sel.anchorNode.parentElement?.classList.contains("code") ? sel.anchorOffset : (lines[i] ?? "").search(/\S/);
+                      const text = sel?.anchorNode?.parentElement?.closest(".code");
+                      const range = text && sel?.anchorNode ? document.createRange() : null;
+                      range?.setStart(text!, 0);
+                      if (range && sel?.anchorNode) range.setEnd(sel.anchorNode, sel.anchorOffset);
+                      const off = range?.toString().length ?? (lines[i] ?? "").search(/\S/);
                       setCur(i);
                       setCol(Math.max(0, off));
                     }}>
                     <span className="no">{i + 1}</span>
-                    <span className="code">{lines[i]}</span>
+                    <span className="code"><CodeText path={src.path} text={lines[i] ?? ""} query={q} /></span>
                   </div>
                 );
               })}

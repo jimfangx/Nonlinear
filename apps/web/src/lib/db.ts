@@ -53,6 +53,16 @@ export async function putRecord(collection: string, id: string, value: unknown):
   await d.put("records", { collection, id, value, updatedAt: Date.now() } satisfies StoredRecord, `${collection}:${id}`);
 }
 
+export async function restoreRecords(records: StoredRecord[], blobs: [string, string][]): Promise<void> {
+  if (native()) return invoke("db_restore", { records, blobs });
+  const tx = (await db()).transaction(["records", "blobs"], "readwrite");
+  await Promise.all([
+    ...records.map((record) => tx.objectStore("records").put(record, `${record.collection}:${record.id}`)),
+    ...blobs.map(([key, value]) => tx.objectStore("blobs").put(value, key)),
+    tx.done,
+  ]);
+}
+
 export async function deleteRecord(collection: string, id: string): Promise<void> {
   if (native()) return invoke("db_delete", { collection, id });
   const d = await db();
@@ -108,4 +118,41 @@ export async function wipeAll(): Promise<void> {
   if (native()) return invoke("db_wipe");
   const d = await db();
   for (const s of ["records", "blobs", "outbox"] as const) await d.clear(s);
+}
+
+export interface EraseReport {
+  removed: string[];
+  bytes: number;
+  errors: string[];
+}
+
+/**
+ * Erase everything Nonlinear stores on this device: records, blobs, the outbox,
+ * browser storage, and on desktop the SQLite file (compacted), repo mirrors,
+ * worktrees, timeline caches, the webview cache and an older build's folder.
+ * `secretKeys` (tokens, API keys) are removed too when given. The user's own
+ * working trees are never touched.
+ */
+export async function eraseEverything(opts: { secretKeys: string[]; localRepos: string[] }): Promise<EraseReport> {
+  let report: EraseReport = { removed: [], bytes: 0, errors: [] };
+  if (native()) {
+    report = await invoke<EraseReport>("data_wipe_all", { secretKeys: opts.secretKeys, localRepos: opts.localRepos });
+  } else {
+    const d = await db();
+    for (const s of ["records", "blobs", "outbox"] as const) await d.clear(s);
+    report.removed.push("IndexedDB records, blobs and outbox");
+    if (opts.secretKeys.length) {
+      await d.clear("secrets");
+      report.removed.push("saved tokens and keys");
+    }
+  }
+  try {
+    const n = localStorage.length + sessionStorage.length;
+    localStorage.clear();
+    sessionStorage.clear();
+    report.removed.push(`browser storage (${n} entries)`);
+  } catch (error) {
+    report.errors.push(`browser storage: ${String(error)}`);
+  }
+  return report;
 }

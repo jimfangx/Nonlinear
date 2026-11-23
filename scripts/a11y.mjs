@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { chromium } from "playwright-core";
+import { createMockInboxView } from "./mock-inbox.mjs";
 const require = createRequire(import.meta.url);
 const axeSrc = readFileSync(require.resolve("axe-core/axe.min.js"), "utf8");
 const APP = process.argv[2] ?? "http://localhost:4173";
@@ -18,8 +19,8 @@ for (const scheme of ["light", "dark"]) {
   await page.getByRole("button", { name: "Save token" }).click();
   await page.getByText("@maintainer").first().waitFor();
   await page.goto(`${APP}/#/inbox`);
-  await page.getByRole("button", { name: /Use “Chipyard integration” example/ }).click();
-  await page.getByText("Bump BOOM for i34 fix").first().waitFor({ timeout: 15000 });
+  await createMockInboxView(page);
+  await page.getByText("Bump BOOM for iteration 95").first().waitFor({ timeout: 15000 });
   await page.locator(".list-row", { hasText: "ucb-bar/chipyard#789" }).click();
   await page.waitForTimeout(800);
   const pages = [

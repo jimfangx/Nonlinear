@@ -50,7 +50,7 @@ export function RepoPicker({ value, onChange }: { value: string[]; onChange: (v:
       <div className="row">
         <input
           className="input grow"
-          placeholder="owner/repo, org name, or search terms"
+          data-workspace-search data-workspace-entry placeholder="owner/repo, org name, or search terms"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => {
@@ -75,7 +75,7 @@ export function RepoPicker({ value, onChange }: { value: string[]; onChange: (v:
       <div className="row small">
         <span className="muted">{value.length} selected</span>
         <span className="spacer" />
-        <input className="input" style={{ width: 200 }} placeholder="Filter results" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <input className="input" style={{ width: 200 }} data-workspace-search placeholder="Filter results" value={filter} onChange={(e) => setFilter(e.target.value)} />
       </div>
       <div style={{ maxHeight: 340, overflow: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
         {groups.map(([owner, rs]) => (
@@ -94,7 +94,7 @@ export function RepoPicker({ value, onChange }: { value: string[]; onChange: (v:
             ))}
           </div>
         ))}
-        {!groups.length && <div className="empty small">Search for repositories, list an organization (e.g. <code>ucb-bar</code>), or enter <code>owner/repo</code> and press Enter.</div>}
+        {!groups.length && <div className="empty small">Search for repositories, list an organization, or enter <code>owner/repo</code> and press Enter.</div>}
       </div>
       <div className="faint small">
         Read-only public repositories are fine to track. Write permission is tracked separately (read / triage / write / maintain / admin); being a collaborator does not imply write access.

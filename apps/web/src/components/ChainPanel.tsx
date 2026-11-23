@@ -13,7 +13,7 @@ import {
 } from "@nonlinear/core";
 import { useApp } from "../lib/store";
 import { useChainGraph, hydrateChain, setLocalEdges, chainIdFor, edgeId } from "../lib/chains";
-import { cachedCapabilities, writeChainBlock, WriteBlocked, describeError } from "../lib/github";
+import { cachedCapabilities, deferredNotice, writeChainBlock, WriteBlocked, describeError } from "../lib/github";
 import { Modal, SyncChip, memberState } from "./ui";
 
 /**
@@ -200,8 +200,9 @@ function MutationPreview({ mutation, graph, members, onClose }: { mutation: Chai
         const chainId = chainIdFor(comp.topoOrder(comp.component(members[0]!)));
         for (const b of bodyChanges.filter((x) => x.canEdit)) {
           const res = await writeChainBlock(b.key, b.pr!.body ?? "", { chainId, dependsOn: b.prereqs, stack: b.stack });
-          if ("queued" in res) toast("warn", `Offline: ${b.key} update queued for confirmation`);
-          else if (res.kind === "conflict") toast("error", `${b.key}: ${res.reason} Resolve before re-saving.`);
+          const notice = deferredNotice(res, `${b.key} update`);
+          if (notice) toast("warn", notice);
+          else if ("kind" in res && res.kind === "conflict") toast("error", `${b.key}: ${res.reason} Resolve before re-saving.`);
           else toast("success", `Updated managed block in ${b.key}`);
         }
       }

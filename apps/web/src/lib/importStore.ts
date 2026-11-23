@@ -77,3 +77,21 @@ export async function deleteImport(id: string): Promise<void> {
   await tx.store.delete(`index:${id}`);
   await tx.done;
 }
+
+export async function exportDiffChunks(ids: string[]): Promise<[string, string][]> {
+  const tx = (await db()).transaction("chunks");
+  const entries = await Promise.all(ids.map(async (id) => {
+    const range = IDBKeyRange.bound(`file:${id}|`, `file:${id}|￿`);
+    const [index, keys, values] = await Promise.all([tx.store.get(`index:${id}`), tx.store.getAllKeys(range), tx.store.getAll(range)]);
+    if (typeof index !== "string") return [];
+    return [[`index:${id}`, index], ...keys.map((key, i) => [String(key), values[i] as string])] as [string, string][];
+  }));
+  return entries.flat();
+}
+
+export async function restoreDiffChunks(chunks: [string, string][]): Promise<void> {
+  if (!chunks.length) return;
+  const tx = (await db()).transaction("chunks", "readwrite");
+  await Promise.all([...chunks.map(([key, value]) => tx.store.put(value, key)), tx.done]);
+  lru.clear();
+}

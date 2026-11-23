@@ -24,7 +24,7 @@ const repos = {
   "chipsalliance/rocket-chip": { owner: "chipsalliance", name: "rocket-chip", id: 3, perms: { pull: true }, default: "master", hist: history("40c4e7", 8, 80, 10, "rocketdev") },
 };
 // unmerged BOOM PR head (off master)
-const boomPRHead = { sha: sha("b00bff", 1), parents: [sha("b00b00", 9)], date: iso(5), msg: "Fix i34 issue-queue wakeup", author: "boomdev" };
+const boomPRHead = { sha: sha("b00bff", 1), parents: [sha("b00b00", 9)], date: iso(5), msg: "Fix retry handling for iteration 95", author: "boomdev" };
 repos["riscv-boom/riscv-boom"].extra = [boomPRHead];
 
 const gitmodules = `[submodule "generators/boom"]
@@ -45,12 +45,12 @@ index 1111111..2222222 100644
 @@ -10,6 +10,8 @@ class IssueUnit(implicit p: Parameters) extends BoomModule {
    val io = IO(new IssueUnitIO)
    val slots = Seq.fill(numSlots)(Module(new IssueSlot))
--  val wakeup = io.wakeup_ports
-+  // i34: filter speculative wakeups
-+  val wakeup = io.wakeup_ports.map(w => w.filter(!_.bits.poisoned))
+-  val updates = io.update_ports
++  // iteration 95: skip stale updates
++  val updates = io.update_ports.map(u => u.filter(!_.bits.stale))
 +  val revision = ${n}
    for (s <- slots) {
-     s.io.wakeup := wakeup
+     s.io.update := updates
    }
 @@ -40,5 +41,6 @@ class IssueUnit(implicit p: Parameters) extends BoomModule {
    def selectOldest(): UInt = {
@@ -62,10 +62,10 @@ index 1111111..2222222 100644
 `;
 
 const prs = {
-  "riscv-boom/riscv-boom#123": { number: 123, repo: "riscv-boom/riscv-boom", title: "Fix i34 issue-queue wakeup", body: "Fixes the speculative wakeup bug.\n", user: "boomdev", head: boomPRHead.sha, headRef: "fix-i34", base: "master", baseSha: sha("b00b00", 9), draft: false, reviewers: [], created: iso(6), updated: iso(5), diff: scalaDiff("src/main/scala/v3/exu/issue-unit.scala", 1), ci: "success" },
-  "riscv-boom/riscv-boom#124": { number: 124, repo: "riscv-boom/riscv-boom", title: "Tune LSU replay", body: "", user: "boomdev", head: sha("b00b00", 11), headRef: "lsu", base: "master", baseSha: sha("b00b00", 10), draft: true, reviewers: [], created: iso(9), updated: iso(8), diff: scalaDiff("src/main/scala/v3/lsu/lsu.scala", 4), ci: "success" },
+  "riscv-boom/riscv-boom#123": { number: 123, repo: "riscv-boom/riscv-boom", title: "Fix retry handling for iteration 95", body: "Fixes stale updates being retried.\n", user: "boomdev", head: boomPRHead.sha, headRef: "fix-iter95", base: "master", baseSha: sha("b00b00", 9), draft: false, reviewers: [], created: iso(6), updated: iso(5), diff: scalaDiff("src/main/scala/v3/exu/issue-unit.scala", 1), ci: "success" },
+  "riscv-boom/riscv-boom#124": { number: 124, repo: "riscv-boom/riscv-boom", title: "Tidy up test configs", body: "", user: "boomdev", head: sha("b00b00", 11), headRef: "test-configs", base: "master", baseSha: sha("b00b00", 10), draft: true, reviewers: [], created: iso(9), updated: iso(8), diff: scalaDiff("src/test/scala/configs/TestConfigs.scala", 4), ci: "success" },
   "ucb-bar/chipyard#789": {
-    number: 789, repo: "ucb-bar/chipyard", title: "Bump BOOM for i34 fix", body: "Integrates the BOOM i34 fix.\n\nDepends-On: riscv-boom/riscv-boom#123\n", user: "contributor", head: sha("c0ffff", 1), headRef: "bump-boom", base: "main", baseSha: chipyardTip, draft: false, reviewers: ["maintainer"], created: iso(4), updated: iso(1),
+    number: 789, repo: "ucb-bar/chipyard", title: "Bump BOOM for iteration 95", body: "Integrates the iteration 95 fix from BOOM.\n\nDepends-On: riscv-boom/riscv-boom#123\n", user: "contributor", head: sha("c0ffff", 1), headRef: "bump-boom", base: "main", baseSha: chipyardTip, draft: false, reviewers: ["maintainer"], created: iso(4), updated: iso(1),
     diff: scalaDiff("generators/chipyard/src/main/scala/config/BoomConfigs.scala", 2) + `diff --git a/generators/boom b/generators/boom
 index ${sha("b00b00", 5).slice(0, 7)}..${boomPRHead.sha.slice(0, 7)} 160000
 --- a/generators/boom
@@ -92,6 +92,7 @@ function findCommit(k, ref) {
   const r = repos[k];
   const all = [...r.hist, ...(r.extra ?? [])];
   if (ref === r.default || ref === "HEAD") return r.hist[0];
+  if (ref === "fix-iter95") return r.extra?.[0];
   return all.find((c) => c.sha === ref || c.sha.startsWith(ref));
 }
 function pullJson(key) {
@@ -215,6 +216,10 @@ const server = http.createServer(async (req, res) => {
   }
   if (/^\/commits\/[^/]+\/check-runs$/.test(rest)) return send(200, { total_count: 0, check_runs: [] });
   if ((m = /^\/commits\/([^/]+)$/.exec(rest))) {
+    if (accept.includes("diff")) {
+      const pr = Object.values(prs).find((item) => item.repo === key && item.head === m[1]);
+      return pr ? send(200, pr.diff, "text/plain") : send(404, { message: "No commit found" });
+    }
     const c = findCommit(key, decodeURIComponent(m[1]));
     return c ? send(200, commitJson(key, c)) : send(404, { message: "No commit found" });
   }
@@ -250,7 +255,7 @@ const server = http.createServer(async (req, res) => {
   if (rest === "/git/trees" && req.method === "POST") { created.trees++; return send(201, { sha: "newtree" }); }
   if (rest === "/git/commits" && req.method === "POST") { created.commits++; return send(201, { sha: "newcommit" }); }
   if (rest === "/git/refs" && req.method === "POST") { created.refs.push(json.ref); return send(201, { ref: json.ref }); }
-  if (rest === "/branches") return send(200, [{ name: r.default, commit: { sha: r.hist[0].sha } }, ...(r.extra ? [{ name: "fix-i34", commit: { sha: r.extra[0].sha } }] : [])]);
+  if (rest === "/branches") return send(200, [{ name: r.default, commit: { sha: r.hist[0].sha } }, ...(r.extra ? [{ name: "fix-iter95", commit: { sha: r.extra[0].sha } }] : [])]);
   if (rest === "/tags") return send(200, [{ name: "v1.0.0", commit: { sha: r.hist[Math.min(3, r.hist.length - 1)].sha } }]);
   if (rest === "/labels") return send(200, [{ name: "bug", color: "f00" }]);
   if (rest === "/milestones") return send(200, []);

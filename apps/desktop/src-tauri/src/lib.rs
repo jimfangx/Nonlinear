@@ -6,6 +6,8 @@ mod mirror;
 mod lsp;
 mod oauth;
 mod remote;
+mod review_mcp;
+pub use review_mcp::serve as serve_review_mcp;
 mod store;
 
 use serde::Serialize;
@@ -25,12 +27,32 @@ fn e<E: std::fmt::Display>(x: E) -> String {
 /* ---------------- SQLite store ---------------- */
 
 #[tauri::command]
+fn review_mcp_share(app: tauri::AppHandle, store: tauri::State<Store>, context: Option<serde_json::Value>) -> Res<serde_json::Value> {
+    let db = app.path().app_data_dir().map_err(e)?.join("nonlinear.sqlite3");
+    let command = std::env::current_exe().map_err(e)?;
+    if let Some(context) = context {
+        if !context.is_object() || context.to_string().len() > review_mcp::MAX_CONTEXT_BYTES {
+            return Err("Review context exceeds the share limit".into());
+        }
+        let payload = serde_json::json!({ "expiresAt": review_mcp::now_seconds() + 1800, "context": context });
+        store.blob_put(review_mcp::CONTEXT_KEY, &payload.to_string()).map_err(e)?;
+    } else {
+        store.blob_delete(review_mcp::CONTEXT_KEY).map_err(e)?;
+    }
+    Ok(serde_json::json!({ "command": command, "args": ["--review-mcp", db.to_string_lossy().as_ref()] }))
+}
+
+#[tauri::command]
 fn db_load_all(s: tauri::State<Store>) -> Res<Vec<store::Record>> {
     s.load_all().map_err(e)
 }
 #[tauri::command]
 fn db_put(s: tauri::State<Store>, collection: String, id: String, value: serde_json::Value) -> Res<()> {
     s.put(&collection, &id, &value, now()).map_err(e)
+}
+#[tauri::command]
+fn db_restore(s: tauri::State<Store>, records: Vec<store::Record>, blobs: Vec<(String, String)>) -> Res<()> {
+    s.restore(&records, &blobs).map_err(e)
 }
 #[tauri::command]
 fn db_delete(s: tauri::State<Store>, collection: String, id: String) -> Res<()> {
@@ -64,6 +86,93 @@ fn outbox_remove(s: tauri::State<Store>, ids: Vec<String>) -> Res<()> {
 #[tauri::command]
 fn db_wipe(s: tauri::State<Store>) -> Res<()> {
     s.wipe().map_err(e)
+}
+
+/// Full local erase: database (compacted), mirrors, worktrees, timeline caches, the
+/// webview/HTTP cache, an older build's data folder, and optionally keychain secrets.
+/// The user's own working trees are never touched; their stale worktree entries are pruned.
+#[derive(Serialize)]
+struct WipeReport {
+    removed: Vec<String>,
+    bytes: u64,
+    errors: Vec<String>,
+}
+
+fn dir_size(p: &std::path::Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(p) else { return 0 };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    std::fs::read_dir(p).map(|rd| rd.flatten().map(|e| dir_size(&e.path())).sum()).unwrap_or(0)
+}
+
+#[tauri::command]
+async fn data_wipe_all(
+    app: tauri::AppHandle,
+    s: tauri::State<'_, Store>,
+    lsps: tauri::State<'_, std::sync::Arc<lsp::LspManager>>,
+    secret_keys: Vec<String>,
+    local_repos: Vec<String>,
+) -> Res<WipeReport> {
+    lsps.shutdown_all(); // language servers may hold worktrees open
+    let mut report = WipeReport { removed: vec![], bytes: 0, errors: vec![] };
+    let data = data_dir(&app)?;
+    let before = ["nonlinear.sqlite3", "nonlinear.sqlite3-wal", "nonlinear.sqlite3-shm"].iter().map(|f| dir_size(&data.join(f))).sum::<u64>();
+    match s.wipe_and_compact() {
+        Ok(()) => {
+            let after = ["nonlinear.sqlite3", "nonlinear.sqlite3-wal", "nonlinear.sqlite3-shm"].iter().map(|f| dir_size(&data.join(f))).sum::<u64>();
+            report.bytes += before.saturating_sub(after);
+            report.removed.push("database".into());
+        }
+        Err(x) => report.errors.push(format!("database: {x}")),
+    }
+    let mut targets: Vec<std::path::PathBuf> = ["mirrors", "worktrees", "timeline-history", "timeline-trees"].iter().map(|d| data.join(d)).collect();
+    // Data folder of builds that used the old bundle identifier.
+    if let Some(parent) = data.parent() {
+        let legacy = parent.join("dev.nonlinear.app");
+        if legacy != data {
+            targets.push(legacy);
+        }
+    }
+    if let Ok(cache) = app.path().app_cache_dir() {
+        if let Ok(rd) = std::fs::read_dir(&cache) {
+            targets.extend(rd.flatten().map(|e| e.path()));
+        }
+    }
+    for t in targets {
+        if !t.exists() {
+            continue;
+        }
+        let size = dir_size(&t);
+        let res = if t.is_dir() { std::fs::remove_dir_all(&t) } else { std::fs::remove_file(&t) };
+        match res {
+            Ok(()) => {
+                report.bytes += size;
+                report.removed.push(t.to_string_lossy().into_owned());
+            }
+            Err(x) => report.errors.push(format!("{}: {x}", t.display())),
+        }
+    }
+    // Worktrees made from the user's own checkouts leave metadata in that repo; prune only the entries whose folder is gone.
+    for repo in local_repos {
+        if let Ok(r) = git::validate_repo(&repo) {
+            let _ = git::run_git(&r, &["worktree", "prune"], std::time::Duration::from_secs(20));
+        }
+    }
+    for key in secret_keys {
+        if let Err(x) = keychain_set(key.clone(), None) {
+            report.errors.push(format!("keychain {key}: {x}"));
+        } else {
+            report.removed.push(format!("keychain:{key}"));
+        }
+    }
+    Ok(report)
+}
+
+#[tauri::command]
+async fn git_grep(repo_path: String, word: String, max: usize) -> Res<Vec<git::GrepHit>> {
+    let r = git::validate_repo(&repo_path).map_err(e)?;
+    tauri::async_runtime::spawn_blocking(move || git::grep_word(&r, &word, max.clamp(1, 5000))).await.map_err(e)?.map_err(e)
 }
 
 /* ---------------- OS keychain (secrets never touch SQLite or sync) ---------------- */
@@ -216,10 +325,10 @@ async fn mirror_ensure(app: tauri::AppHandle, repo_key: String, fetch: bool) -> 
 }
 
 #[tauri::command]
-async fn timeline_fetch(app: tauri::AppHandle, repo_key: String, rev: String, depth: usize, trees: bool, since: Option<String>) -> Res<(String, String)> {
+async fn timeline_fetch(app: tauri::AppHandle, repo_key: String, rev: String, depth: usize, trees: bool, since: Option<String>, refresh: Option<bool>) -> Res<(String, String)> {
     let dir = data_dir(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        mirror::timeline_fetch(&dir, &repo_key, &rev, depth, trees, since.as_deref())
+        mirror::timeline_fetch(&dir, &repo_key, &rev, depth, trees, since.as_deref(), refresh.unwrap_or(false))
             .map(|(path, reference)| (path.to_string_lossy().into_owned(), reference))
     }).await.map_err(e)?.map_err(e)
 }
@@ -358,7 +467,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            db_load_all, db_put, db_delete, blob_put, blob_get, blob_delete, outbox_add, outbox_all, outbox_remove, db_wipe,
+            review_mcp_share, db_load_all, db_put, db_restore, db_delete, blob_put, blob_get, blob_delete, outbox_add, outbox_all, outbox_remove, db_wipe, data_wipe_all, git_grep,
             keychain_get, keychain_set,
             git_log, git_refs, git_gitlinks, git_diff, git_show_file, git_checkout_detached,
             ssh_run, codegraph, codegraph_lineage,

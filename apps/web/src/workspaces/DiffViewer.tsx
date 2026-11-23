@@ -1,3 +1,5 @@
+import { getBlob, putBlob } from "../lib/db";
+import { gitShowFile } from "../lib/sources";
 import { useEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -5,13 +7,15 @@ import { filterFiles, parseGitmodules, submoduleMap, LARGE_IMPORT_WARN_BYTES, ty
 import { useApp } from "../lib/store";
 import { deleteImport, loadFileSection, loadIndex, searchContent } from "../lib/importStore";
 import { githubApi, describeError } from "../lib/github";
-import { FileDiff, type DiffMode } from "../components/FileDiff";
-import { Split, timeAgo } from "../components/ui";
+import { DiffCodeLayoutSelect, FileDiff, useDiffCodeLayout, type DiffCodeLayout, type DiffMode } from "../components/FileDiff";
+import { DiffStat, Split, timeAgo } from "../components/ui";
+import { NavIcon } from "../components/NavIcon";
+import { keyLabel, useActions } from "../lib/keys";
 import type { WorkerIn, WorkerOut } from "../workers/diff.worker";
 
 const loaded = new Map<string, MultiRepoDiff>();
 
-function parseInWorker(file: File, name: string, submodules: WorkerIn["submodules"], onProgress: (p: string) => void): Promise<{ diff: MultiRepoDiff; ms: number }> {
+function parseInWorker(file: File, name: string, root: string, rootRef: string, submodules: WorkerIn["submodules"], onProgress: (p: string) => void): Promise<{ diff: MultiRepoDiff; ms: number }> {
   return new Promise((resolve, reject) => {
     const w = new Worker(new URL("../workers/diff.worker.ts", import.meta.url), { type: "module" });
     w.onmessage = (e: MessageEvent<WorkerOut>) => {
@@ -30,7 +34,7 @@ function parseInWorker(file: File, name: string, submodules: WorkerIn["submodule
       reject(new Error(e.message));
       w.terminate();
     };
-    w.postMessage({ kind: "import", file, name, submodules } satisfies WorkerIn);
+    w.postMessage({ kind: "import", file, name, root, rootRef, submodules } satisfies WorkerIn);
   });
 }
 
@@ -40,7 +44,7 @@ export function DiffWorkspace() {
   const nav = useNavigate();
   const [diff, setDiff] = useState<MultiRepoDiff | null>(null);
   const [status, setStatus] = useState<string | null>(null);
-  const [root, setRoot] = useState("ucb-bar/chipyard");
+  const [root, setRoot] = useState("");
   const [rootRef, setRootRef] = useState("main");
   const fileRef = useRef<HTMLInputElement>(null);
   const importing = useRef(false);
@@ -67,14 +71,14 @@ export function DiffWorkspace() {
     try {
       if (f.size > LARGE_IMPORT_WARN_BYTES) useApp.getState().toast("info", `${(f.size / 1048576).toFixed(1)} MB is above the 50 MB target: patches are spilled to disk and loaded per file.`);
       let subs: WorkerIn["submodules"];
-      if (root.trim()) {
+      if (/^[^/\s]+\/[^/\s]+$/.test(root.trim())) {
         setStatus(`Resolving submodules via ${root}@${rootRef} .gitmodules…`);
-        subs = await resolveSubmodules(root.trim(), rootRef).catch((e) => {
+        subs = await resolveSubmodules(root.trim(), rootRef.trim() || "HEAD").catch((e) => {
           useApp.getState().toast("warn", `Could not resolve .gitmodules: ${describeError(e)}. Importing without repository identities.`);
           return undefined;
         });
       }
-      const { diff: d, ms } = await parseInWorker(f, f.name, subs, setStatus);
+      const { diff: d, ms } = await parseInWorker(f, f.name, root.trim(), rootRef.trim() || "HEAD", subs, setStatus);
       useApp.getState().put("diffs", d.id, { id: d.id, name: f.name, rootRepo: root.trim() || null, sourceBytes: d.sourceBytes, contentHash: d.contentHash, importedAt: d.importedAt, totals: d.totals });
       loaded.set(d.id, d);
       setStatus(null);
@@ -110,12 +114,12 @@ export function DiffWorkspace() {
     return (
       <div className="page" {...dropHandlers}>
         <h1 className="h1">Multi-Repository Diff</h1>
-        <p className="muted">Import a JSON object mapping relative submodule path → unified diff string. The empty key "" is the root repository. Nothing in the file is executed, and importing implies no GitHub change.</p>
+        <p className="muted">Import a JSON map of submodule patches or a .diff or .patch with optional submodule changes.</p>
         <div className="panel pad col" style={{ maxWidth: 720 }}>
           <div className="row">
             <label className="col grow" style={{ gap: 2 }}>
               <span className="small muted">Root repository (optional, resolves submodule identities)</span>
-              <input className="input" value={root} onChange={(e) => setRoot(e.target.value)} placeholder="owner/repo" />
+              <input className="input" value={root} onChange={(e) => setRoot(e.target.value)} data-workspace-entry placeholder="owner/repo" />
             </label>
             <label className="col" style={{ gap: 2, width: 140 }}>
               <span className="small muted">Ref</span>
@@ -123,9 +127,9 @@ export function DiffWorkspace() {
             </label>
           </div>
           <button type="button" className={`panel pad diff-drop ${dragging ? "drag-over" : ""}`} onClick={() => fileRef.current?.click()}>
-            Drop a .json diff here or click to choose
+            Drop a JSON, .diff, or .patch file here or click to choose
           </button>
-          <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={(e) => {
+          <input ref={fileRef} type="file" accept=".json,.diff,.patch,application/json,text/x-diff,text/x-patch" hidden onChange={(e) => {
             const file = e.currentTarget.files?.[0];
             e.currentTarget.value = "";
             if (file) void importFile(file);
@@ -166,16 +170,33 @@ export function DiffWorkspace() {
   }
   return <div className="active-diff-workspace" {...dropHandlers}>
     <DiffView diff={diff} />
-    {(dragging || status) && <div className="panel pad diff-drop-status" role="status">{dragging ? "Drop to import a new JSON diff" : status}</div>}
+    {(dragging || status) && <div className="panel pad diff-drop-status" role="status">{dragging ? "Drop to import a diff" : status}</div>}
   </div>;
 }
 
-async function resolveSubmodules(root: string | null, ref: string): Promise<WorkerIn["submodules"]> {
-  if (!root) return undefined;
+async function resolveSubmodules(root: string, ref: string): Promise<WorkerIn["submodules"]> {
   const [owner, repo] = root.split("/") as [string, string];
-  const text = await (await githubApi()).contents(owner, repo, ".gitmodules", ref);
-  if (!text) return undefined;
-  return [...submoduleMap(parseGitmodules(text, { owner, repo }))];
+  const settings = useApp.getState().settings_();
+  const path = settings.localRepos[root.toLowerCase()];
+  let text: string | null | undefined;
+  if (path) {
+    try { text = await gitShowFile({ kind: "local", path }, ref, ".gitmodules"); } catch { /* Try the configured GitHub source. */ }
+  }
+  if (text === undefined || text === null) {
+    const key = `diff-gitmodules:${settings.apiBase}:${settings.me ?? "anonymous"}:${settings.publicOnly}:${root.toLowerCase()}:${ref}`;
+    const saved = await getBlob(key).then((value) => value ? JSON.parse(value) as { text: string | null; at: number } : null).catch(() => null);
+    if (saved && (Date.now() - saved.at < 30 * 60_000 || !useApp.getState().online)) text = saved.text;
+    else {
+      try {
+        text = await (await githubApi()).contents(owner, repo, ".gitmodules", ref);
+        await putBlob(key, JSON.stringify({ text, at: Date.now() })).catch(() => undefined);
+      } catch (error) {
+        if (!saved) throw error;
+        text = saved.text;
+      }
+    }
+  }
+  return [...submoduleMap(parseGitmodules(text ?? "", { owner, repo }))];
 }
 
 const KINDS = ["added", "deleted", "modified", "renamed", "binary", "submodule", "mode-change"];
@@ -186,6 +207,12 @@ function DiffView({ diff }: { diff: MultiRepoDiff }) {
   const [kinds, setKinds] = useState<Set<string>>(new Set());
   const [groupsSel, setGroupsSel] = useState<Set<string> | null>(null);
   const [mode, setMode] = useState<DiffMode>("split");
+  const [sidebar, setSidebar] = useState(() => localStorage.getItem("nl:diff-sidebar") !== "hidden");
+  const [fit, setFit] = useDiffCodeLayout("nl:diff-fit", "wrap");
+  const toggleSidebar = () => setSidebar((value) => {
+    localStorage.setItem("nl:diff-sidebar", value ? "hidden" : "visible");
+    return !value;
+  });
   const [sel, setSel] = useState<{ g: string; p: string } | null>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
@@ -222,15 +249,25 @@ function DiffView({ diff }: { diff: MultiRepoDiff }) {
   const virt = useVirtualizer({ count: rows.length, getScrollElement: () => parentRef.current, estimateSize: () => 26, overscan: 20 });
   const current = sel ? diff.groups.find((g) => g.path === sel.g)?.index.files.find((f) => f.path === sel.p) : undefined;
   const currentGroup = sel ? diff.groups.find((g) => g.path === sel.g) : undefined;
+  const fileRows = useMemo(() => rows.map((r, i) => ({ r, i })).filter((x): x is { r: Extract<Row, { t: "file" }>; i: number } => x.r.t === "file"), [rows]);
+  const step = (delta: number) => {
+    if (!fileRows.length) return;
+    const at = fileRows.findIndex(({ r }) => sel?.g === r.g.path && sel.p === r.f.path);
+    const next = fileRows[at < 0 ? (delta > 0 ? 0 : fileRows.length - 1) : Math.max(0, Math.min(fileRows.length - 1, at + delta))]!;
+    setSel({ g: next.r.g.path, p: next.r.f.path });
+    virt.scrollToIndex(next.i, { align: "auto" });
+  };
+  useActions({ next: () => step(1), prev: () => step(-1), diffSidebar: (event) => { if (!event.repeat && !document.querySelector("#workspace-content[inert], .overlay:not([inert])")) toggleSidebar(); } }, [fileRows, sel]);
 
   return (
     <div className="col" style={{ height: "100%", gap: 0 }}>
       <div className="toolbar">
+        <button className="btn ghost" type="button" aria-label="Toggle changed files" aria-pressed={sidebar} title={`Toggle changed files (${keyLabel("diffSidebar")})`} onClick={toggleSidebar}><NavIcon name="sidebar" /></button>
         <h1 className="toolbar-title">{diff.name}</h1>
         <span className="chip">
           {diff.totals.files} files · +{diff.totals.additions} −{diff.totals.deletions} · {diff.groups.length} groups
         </span>
-        <input className="input" style={{ width: 240 }} placeholder="Search paths…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input className="input" style={{ width: 240 }} data-workspace-search placeholder="Search paths…" value={q} onChange={(e) => setQ(e.target.value)} />
         <label className="row small">
           <input type="checkbox" checked={content} onChange={(e) => setContent(e.target.checked)} /> search content
         </label>
@@ -240,6 +277,7 @@ function DiffView({ diff }: { diff: MultiRepoDiff }) {
           </button>
         ))}
         <span className="spacer" />
+        <DiffCodeLayoutSelect layout={fit} onChange={setFit} />
         <select className="input" value={mode} onChange={(e) => setMode(e.target.value as DiffMode)} aria-label="Diff mode">
           <option value="split">Side-by-side</option>
           <option value="unified">Unified</option>
@@ -247,8 +285,10 @@ function DiffView({ diff }: { diff: MultiRepoDiff }) {
       </div>
       {diff.issues.length > 0 && <div className="banner warn">{diff.issues.join(" · ")}</div>}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <Split id="multidiff" initial={0.26}>
-          <div ref={parentRef} style={{ height: "100%", overflow: "auto", padding: 4 }} role="tree">
+        <Split id="multidiff" className="workspace-split" initial={0.26} showFirst={sidebar}>
+          <div className="col review-file-list diff-file-list" aria-label="Changed files">
+          <div className="review-file-list-head"><span>Files changed · {diff.totals.files}</span><DiffStat compact additions={diff.totals.additions} deletions={diff.totals.deletions} /></div>
+          <div ref={parentRef} style={{ flex: 1, minHeight: 0, overflow: "auto", padding: 4 }} role="tree">
             <div style={{ height: virt.getTotalSize(), position: "relative" }}>
               {virt.getVirtualItems().map((vi) => {
                 const r = rows[vi.index]!;
@@ -277,9 +317,9 @@ function DiffView({ diff }: { diff: MultiRepoDiff }) {
                 }
                 const active = sel?.g === r.g.path && sel.p === r.f.path;
                 return (
-                  <div key={vi.key} style={{ ...style, paddingLeft: 22 }} className={`tree-row ${active ? "active" : ""}`} onClick={() => setSel({ g: r.g.path, p: r.f.path })} title={r.f.path}>
+                  <div key={vi.key} style={{ ...style, paddingLeft: 22 }} className={`tree-row ${active ? "active" : ""}`} role="treeitem" aria-selected={active} onClick={() => setSel({ g: r.g.path, p: r.f.path })} title={r.f.path}>
                     <KindIcon k={r.f.kind} />
-                    <span className="ellipsis grow">{r.f.path}</span>
+                    <span className="ellipsis grow">{r.f.path.split("/").at(-1)} <span className="faint small">{r.f.path.split("/").slice(0, -1).join("/")}</span></span>
                     <span className="small" style={{ color: "var(--ok)" }}>+{r.f.additions}</span>
                     <span className="small" style={{ color: "var(--err)" }}>−{r.f.deletions}</span>
                   </div>
@@ -291,6 +331,7 @@ function DiffView({ diff }: { diff: MultiRepoDiff }) {
                 {g.path || "(root)"}: no changed files
               </div>
             ))}
+          </div>
           </div>
           <div className="col" style={{ height: "100%", gap: 0 }}>
             {current && currentGroup ? (
@@ -310,7 +351,7 @@ function DiffView({ diff }: { diff: MultiRepoDiff }) {
                   {current.issues.length > 0 && <span className="chip err">{current.issues.join("; ")}</span>}
                 </div>
                 <div style={{ flex: 1, minHeight: 0, padding: 4 }}>
-                  <SpilledFileDiff key={`${sel!.g}/${sel!.p}`} id={diff.id} group={currentGroup.path} index={current.index} mode={mode} highlight={content ? q : undefined} />
+                  <SpilledFileDiff key={`${sel!.g}/${sel!.p}`} id={diff.id} group={currentGroup.path} index={current.index} path={current.path} mode={mode} fit={fit} highlight={content ? q : undefined} />
                 </div>
               </>
             ) : (
@@ -323,7 +364,7 @@ function DiffView({ diff }: { diff: MultiRepoDiff }) {
   );
 }
 
-function SpilledFileDiff({ id, group, index, mode, highlight }: { id: string; group: string; index: number; mode: DiffMode; highlight?: string }) {
+function SpilledFileDiff({ id, group, index, path, mode, highlight, fit }: { fit: DiffCodeLayout; id: string; group: string; index: number; path: string; mode: DiffMode; highlight?: string }) {
   const [section, setSection] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
@@ -333,7 +374,7 @@ function SpilledFileDiff({ id, group, index, mode, highlight }: { id: string; gr
     };
   }, [id, group, index]);
   if (section === null) return <div className="empty small">Loading patch from disk…</div>;
-  return <FileDiff section={section} mode={mode} highlight={highlight} />;
+  return <FileDiff path={path} section={section} mode={mode} layout={fit} highlight={highlight} />;
 }
 
 function KindIcon({ k }: { k: string }) {

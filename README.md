@@ -25,39 +25,74 @@ Shipping a release across a dozen repositories and nested Git submodules means j
 - **Your notes stay yours.** Review progress, release plans, cards and private notes live on your devices, with optional end-to-end-encrypted sync.
 - **Built for real ecosystems.** Designed around the [Chipyard](https://github.com/ucb-bar/chipyard) family of repos, and it works for any multi-repo or submodule-heavy project.
 
+<p align="center">
+  <img src="site/screenshots/review.png" alt="Reviewing a diff in Nonlinear: file list, the frontier rail showing reviewed and flagged lines, and an inline private note" width="100%">
+</p>
+
 ## Features
 
 ### 📥 Inbox: PR triage across every repo
-One inbox for every repo you maintain. PRs are sorted into categories you can edit (needs my review, blocked, ready to merge…). You can pin, snooze, group by release and see what changed since you last looked.
+One inbox for every repo you maintain. PRs are sorted into categories you can edit (needs my review, CI failing, blocked by chain, ready to merge…). You can pin, snooze, group by release and see what changed since you last looked.
 
 ### 🔗 Dependency chains
-Declare `Depends-On: org/repo#123` in a PR body, or draw the chain in the UI. Nonlinear builds the DAG, rejects cycles, explains *why* something isn't ready to merge, and keeps a managed chain block up to date in every PR it touches. It shows you every edit before it writes anything.
+Declare `Depends-On: org/repo#123` in a PR body, or build the chain in the UI. Nonlinear builds the DAG, rejects cycles, explains *why* something isn't ready to merge, and keeps a managed chain block up to date in every PR it touches.
 
-### 🕰 Submodule timeline and releases
-Each submodule gets a row on a shared calendar axis, showing pins, tags, branch tips and open PRs. Drag release handles to choose commits, align everything to a date, catch nested inconsistencies, then freeze a release and export a manifest, a patch, or a draft PR that bumps the gitlinks.
+<img src="site/screenshots/inbox.png" alt="PR Inbox with category tabs and a two-PR dependency chain in the details pane" width="100%">
 
 ### 🔍 Review built for big diffs
-A frontier rail tracks exactly which hunks you've reviewed. Progress follows hunks across force-pushes, and anything that changed since you looked is marked stale. You also get flags, private notes, draft comments that post as one GitHub review, prev/next navigation through a chain, and an inline view of submodule changes. Go-to-definition and find-references work with **any LSP server** (clangd, Metals, pyright, rust-analyzer, gopls…).
+- A frontier rail tracks exactly which hunks you've reviewed. Progress follows hunks across force-pushes, and anything that changed since you looked is marked stale.
+- Private notes and draft comments appear inline, and you can delete them in place. Drafts post as one GitHub review.
+- **Ask AI** about a line or a range of lines from the right-click menu or the toolbar. You see the exact prompt and estimated cost before anything is sent.
+- **LGTM** approves in one click. When you start reviewing, Nonlinear requests a review from you, so others see you're on it. GitHub's pending reviews are private, so this is the only visible signal.
+- **Go to definition / find references** in any language: ⌘-click an identifier, right-click it, or select it and press F12 / ⇧F12. Results come from the PR's changes, the full changed files (parsed with tree-sitter for Scala, Python, Rust, TypeScript/JavaScript, C, C++ and Java; per-language text rules for Go, Verilog/SystemVerilog, VHDL, Kotlin, Swift, shell and others), the rest of the repository (`git grep` at the PR head on desktop, GitHub code search on the web), and **any LSP server** you configure (clangd, Metals, pyright, rust-analyzer, gopls…), whose results are marked confirmed.
+- **⌘F searches the code** once you've clicked in the diff, built for files with hundreds of thousands of lines. Match case, whole word, regex, and an all-changed-files mode with per-file counts.
+- Browse changed files as a flat list or a **folder tree**.
+- Step through a chain with prev/next, and expand submodule changes inline.
 
-### 🗂 Kanban board
-Cards link PRs, releases, checklists and dependencies. The same card can sit in different places on different boards, and every action has a keyboard shortcut.
+<img src="site/screenshots/review-nav.png" alt="Review tab with a folder tree, a find bar and the definitions panel" width="100%">
 
-### 📦 Multi-repo diff viewer
-Import a JSON diff that spans the root repo and its submodules. A 51 MB, 3,500-file import is indexed in about 280 ms, saved locally, and reopens instantly offline.
+### 🕰 Submodule timeline
+Each submodule gets a row on a shared calendar axis, with daily or weekly ticks, showing pins, tags, branch tips and open PRs. Drag release handles to choose commits, or suggest pins at a date. **Timeline end** and **Jump to latest main** move the view without touching your pins.
+
+<img src="site/screenshots/timeline.png" alt="Submodule Timeline with pins, tags, branch tips and PR markers" width="100%">
+
+### 📦 Releases and release notes
+Every pin shows the current gitlink → the planned one, linked to GitHub with a compare link. Nonlinear generates release notes from the PRs merged in between, grouped by label like release-drafter. You can edit, copy or download them, export a manifest or lock file, or open a draft PR that bumps every gitlink.
+
+<p align="center"><img src="site/screenshots/releases.png" alt="A release with its pin table and generated release notes" width="560"></p>
+
+### 🛡 Safe mode
+Turn on safe mode from the top bar and nothing is written to GitHub. Comments, reviews, approvals and chain updates are staged instead. When you leave safe mode, you review them one by one and send or discard each.
+
+<img src="site/screenshots/safemode.png" alt="Dialog reviewing two staged GitHub changes, a comment and an LGTM approval" width="100%">
+
+### 🧾 Multi-repo diff viewer
+Import a JSON diff that spans the root repo and its submodules. A 51 MB, 3,500-file import is indexed in about 280 ms, saved locally, and reopens instantly offline. Use <kbd>j</kbd>/<kbd>k</kbd> to step through files.
+
+<img src="site/screenshots/diff.png" alt="Multi-Repo Diff viewer with files grouped by repository and a side-by-side diff" width="100%">
 
 ### 🌿 Git graph
-A lane graph with refs, PRs and pins, plus compare and merge previews. Data can come from the GitHub API, your local working tree, a managed partial mirror, or a remote machine over SSH.
+A lane graph with refs, PRs and the submodule pins at each commit, plus commit diffs, compare and merge previews. Data can come from the GitHub API, your local working tree, a managed partial mirror, or a remote machine over SSH.
 
-### ✨ Optional AI summaries
-Bring your own API key, or use a local **Claude Code** or **Codex CLI** install. You see every prompt before it's sent, policies are set per repo, and a hard budget cap stops spending.
+<img src="site/screenshots/graph.png" alt="Git Graph with a selected commit and its submodule pins" width="100%">
 
-### ⌨️ Also included
-A ⌘K command palette, configurable keybindings, light and dark themes, and offline mode (GitHub writes queue up and wait for your confirmation). Automated WCAG 2.2 AA audits report zero violations.
+### ✨ Optional AI
+Bring your own API key, or use a local **Claude Code** or **Codex CLI** install. You see every prompt before it's sent, policies are set per repo, and a hard budget cap stops spending. On desktop you can also share a review selection with your local MCP clients for 30 minutes.
+
+### 🎨 Also included
+- Seven color themes or your own custom color, light or dark mode, and an optional background image with a darkness mask.
+- A kanban board where cards link PRs, releases and checklists.
+- A ⌘K / ⌘P command palette and configurable keybindings; ⌘/ lists every shortcut.
+- Backup and restore of all local data, and a full erase of everything the app keeps on the device.
+- Offline mode: GitHub writes queue up and wait for your confirmation.
+- Automated WCAG 2.2 AA audits report zero violations.
+
+<img src="site/screenshots/settings.png" alt="Settings: Appearance with color theme swatches and background image picker" width="100%">
 
 ## Install
 
 ### macOS app
-Download the latest `.dmg` from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
+Download the latest `.dmg` (currently **0.1.12**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
 
 > Current builds are Apple Silicon only and ad-hoc signed. The first time you open the app, right-click it and choose **Open**.
 
@@ -78,7 +113,8 @@ You can also use Nonlinear without signing in to browse public repositories, but
 - **Local-first.** Everything you create in Nonlinear is stored on your device: IndexedDB in the browser, SQLite on desktop.
 - **End-to-end-encrypted sync.** Data is encrypted with AES-GCM before it leaves your device. New devices pair by approval with a matching 6-digit code, or with a recovery key.
 - **Minimal GitHub scope.** OAuth requests only `public_repo`, and over-scoped tokens are refused. In the browser, your token never reaches the page.
-- **Nothing is sent without you.** Every write to GitHub (chain blocks, labels, reviews, PRs) shows a preview first and needs your confirmation.
+- **Nothing is sent without you.** Every write to GitHub (chain blocks, labels, reviews, PRs) shows a preview first and needs your confirmation. Safe mode stages all writes until you review them.
+- **Erase in one step.** Settings → Local data → Delete local data removes everything the app stores on the device (database, repo mirrors, caches), and optionally your saved tokens and keys. Your own working trees are never touched.
 
 ## Self-hosting Nonlinear Cloud
 
@@ -110,7 +146,7 @@ npm run desktop    # Tauri desktop app (needs a Rust toolchain)
 | `apps/web` | React PWA, the shared UI for web and desktop |
 | `apps/desktop` | Tauri 2 shell: Git CLI, SQLite, keychain, LSP, SSH helper, OAuth |
 | `services/sync` | Cloudflare Worker + D1: OAuth, GitHub proxy, encrypted sync, device pairing |
-| `site` | Marketing website (static, single file) |
+| `site` | Marketing website (static, deployed to Cloudflare Pages) and the screenshots used here |
 | `scripts` | Mock GitHub, end-to-end journeys, accessibility audits, packaging |
 
 Architecture, test suites and handoff notes are in [`IMPLEMENTATION_NOTES.md`](IMPLEMENTATION_NOTES.md). The full design spec is in [`design/`](design/).
@@ -121,6 +157,12 @@ npm ci
 APPLE_SIGNING_IDENTITY=- npm run build -w @nonlinear/desktop -- --bundles app
 scripts/make-dmg.sh
 ```
+
+**Deploying the website:** `site/` is plain static files (no build step) served by Cloudflare Pages; `site/_headers` sets security and cache headers.
+```sh
+npx wrangler pages deploy site --project-name nonlinear-site
+```
+Or connect the repository in the Cloudflare dashboard with **Build command** empty and **Build output directory** `site`. The site is served at **https://nonlinear.cx** (add it under the Pages project's **Custom domains**); if the domain changes, update the canonical and Open Graph URLs and the JSON-LD block in `site/index.html`, plus `site/robots.txt` and `site/sitemap.xml`.
 
 ## License
 

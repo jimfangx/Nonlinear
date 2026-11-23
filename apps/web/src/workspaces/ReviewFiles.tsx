@@ -1,5 +1,7 @@
+import { copyText } from "../lib/clipboard";
+import { NavIcon } from "../components/NavIcon";
 import { useShallow } from "zustand/react/shallow";
-import { useEffect, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildFilePrompt,
   diffHash,
@@ -30,87 +32,249 @@ import {
   type GitlinkProposal,
   type RawCommit,
   type RawReviewComment,
+  buildFileTree,
+  visibleTreeRows,
+  ancestorFolders,
+  buildFindIndex,
+  findInIndex,
+  nextMatch,
+  matchesByRow,
+  countMatchesPerFile,
+  identifierAt,
 } from "@nonlinear/core";
 import { useApp, useSettings, type DraftComment } from "../lib/store";
-import { fileSectionOf, fileState, saveFileState, gitlinkShas, type LoadedDiff } from "../lib/review";
-import { githubApi, describeError } from "../lib/github";
+import { fileSectionOf, loadInlineComments, fileState, saveFileState, gitlinkShas, type LoadedDiff } from "../lib/review";
+import { githubApi, describeError, signalReviewStart } from "../lib/github";
 import { aiAllowedFor, latestSummary, summarize } from "../lib/ai";
 import { renderMarkdown } from "../lib/markdown";
 import { isDesktop, desktop, invoke } from "../lib/platform";
 import { exactRoot, headMatches, lspAvailable, lspLocations, workingTreeFor, type LspLocation } from "../lib/lsp";
 import { useActions } from "../lib/keys";
 import { expandToEnclosing } from "../lib/treesitter";
-import { FileDiff, hunkStarts, type DiffMode } from "../components/FileDiff";
-import { Split, Modal, download } from "../components/ui";
+import { DiffCodeLayoutSelect, FileDiff, hunkStarts, useDiffCodeLayout, type DiffCodeLayout, type DiffMode, type DiffSide } from "../components/FileDiff";
+import { Split, Modal, download, DiffStat } from "../components/ui";
+import type { AskTarget } from "../components/AskAI";
 import { FileInspector } from "./FileInspector";
+import { SymbolPanel, type SymbolRequest } from "../components/SymbolPanel";
+import { columnAtPoint, type SymbolLocation } from "../lib/codenav";
+
+const onDiffSide = (line: DiffLine, side?: DiffSide) =>
+  side === "LEFT" ? line.oldNo !== null : side === "RIGHT" ? line.newNo !== null : true;
 
 const STATUS_ICON: Record<string, string> = { complete: "✓", incomplete: "◐", "not-started": "○", postponed: "⏸", "needs-rereview": "⟳" };
 
-export function ReviewFiles({ pr, diff, refreshComments }: { pr: PRSnapshot; diff: LoadedDiff; refreshComments: number }) {
+export interface FindState {
+  open: boolean;
+  query: string;
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+  scope: "file" | "all";
+  /** bump to refocus the find input */
+  focus: number;
+}
+
+type FileView = "list" | "tree";
+
+export function ReviewFiles({ pr, diff, refreshComments, focusSearch, onAsk }: { pr: PRSnapshot; diff: LoadedDiff; refreshComments: number; focusSearch?: boolean; onAsk: (target: AskTarget) => void }) {
   const [comments, setComments] = useState<RawReviewComment[]>([]);
   useEffect(() => {
     let active = true;
-    void githubApi().then((api) => api.listReviewComments(pr.owner, pr.repo, pr.number)).then((items) => {
+    void loadInlineComments(pr, refreshComments).then((items) => {
       if (active) setComments(items);
     }).catch(() => undefined);
     return () => { active = false; };
   }, [pr.key, pr.headSha, refreshComments]);
   const reviews = useApp((s) => s.reviews[pr.key]);
-  const [sel, setSel] = useState(0);
+  const [selectedPath, setSelectedPath] = useState(() => localStorage.getItem(`nl:review-file:${pr.key}`) ?? "");
+  const notePaths = useApp(useShallow((s) => Object.values(s.notes).filter((note) => note.prKey === pr.key && note.anchor).map((note) => note.anchor!.path)));
+  const commentPaths = useMemo(() => new Set(comments.map((comment) => comment.path)), [comments]);
   const [filter, setFilter] = useState("");
+  const filterInput = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (focusSearch) { filterInput.current?.focus(); filterInput.current?.select(); } }, [focusSearch]);
   const [mode, setMode] = useState<DiffMode>(() => (localStorage.getItem("nl:diffmode") as DiffMode) ?? "unified");
+  const [layout, setLayout] = useDiffCodeLayout("nl:review-fit", "scroll");
+  const [view, setView] = useState<FileView>(() => localStorage.getItem("nl:review-file-view") === "tree" ? "tree" : "list");
+  const changeView = (v: FileView) => { setView(v); localStorage.setItem("nl:review-file-view", v); };
   const files = diff.index.files;
-  const visible = useMemo(() => files.map((f, i) => ({ f, i })).filter(({ f }) => !filter || f.path.toLowerCase().includes(filter.toLowerCase())), [files, filter]);
+  const tree = useMemo(() => buildFileTree(files.map((f) => f.path)), [files]);
+  const visibleSet = useMemo(() => {
+    const q = filter.toLowerCase();
+    return new Set(files.map((f, i) => (!q || f.path.toLowerCase().includes(q) ? i : -1)).filter((i) => i >= 0));
+  }, [files, filter]);
+  const order = useMemo(() => (view === "tree" ? tree.order : files.map((_, i) => i)).filter((i) => visibleSet.has(i)), [view, tree, files, visibleSet]);
+  const sel = Math.max(0, files.findIndex((file) => file.path === selectedPath));
+  const setSel = (index: number) => {
+    const path = files[index]?.path;
+    if (!path) return;
+    localStorage.setItem(`nl:review-file:${pr.key}`, path);
+    setSelectedPath(path);
+  };
   const f = files[sel];
 
-  useActions(
-    {
-      next: () => setSel((s) => Math.min(files.length - 1, s + 1)),
-      prev: () => setSel((s) => Math.max(0, s - 1)),
-    },
-    [files.length],
-  );
+  // Folder collapse state (tree view), remembered per PR.
+  const collapseKey = `nl:review-tree-collapsed:${pr.key}`;
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(collapseKey) ?? "[]") as string[]); } catch { return new Set(); }
+  });
+  const saveCollapsed = (next: Set<string>) => { setCollapsed(next); try { localStorage.setItem(collapseKey, JSON.stringify([...next])); } catch { /* storage full or blocked */ } };
+  // Keep the selected file visible: expand its folders.
+  useEffect(() => {
+    if (view !== "tree") return;
+    const up = ancestorFolders(tree, sel).filter((p) => collapsed.has(p));
+    if (up.length) saveCollapsed(new Set([...collapsed].filter((p) => !up.includes(p))));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sel, view, tree]);
+
+  const step = (dir: 1 | -1) => {
+    if (!order.length) return;
+    const at = order.indexOf(sel);
+    setSel(order[at < 0 ? 0 : Math.max(0, Math.min(order.length - 1, at + dir))]!);
+  };
+  useActions({ next: () => step(1), prev: () => step(-1) }, [order, sel]);
+
+  // ---- Find (Cmd/Ctrl+F in the code) ----
+  const [find, setFind] = useState<FindState>({ open: false, query: "", caseSensitive: false, wholeWord: false, regex: false, scope: "file", focus: 0 });
+  const [pendingFind, setPendingFind] = useState<{ path: string; at: "first" | "last" } | null>(null);
+  const deferredQuery = useDeferredValue(find.open && find.scope === "all" ? find.query : "");
+  const lowerText = useMemo(() => (find.scope === "all" && find.open && !find.caseSensitive ? diff.text.toLowerCase() : null), [diff.text, find.scope, find.open, find.caseSensitive]);
+  const fileCounts = useMemo(() => countMatchesPerFile(diff.text, lowerText, files.map((x) => x.start), deferredQuery, { caseSensitive: find.caseSensitive, wholeWord: find.wholeWord, regex: find.regex }),
+    [diff.text, lowerText, files, deferredQuery, find.caseSensitive, find.wholeWord, find.regex]);
+  const showCounts = find.open && find.scope === "all" && !!deferredQuery;
+  const totalAll = showCounts ? [...fileCounts.values()].reduce((a, b) => a + b, 0) : 0;
+  const findEdge = (dir: 1 | -1) => {
+    if (find.scope !== "all") return false;
+    const candidates = (view === "tree" ? tree.order : files.map((_, i) => i)).filter((i) => (fileCounts.get(i) ?? 0) > 0);
+    if (!candidates.length) return false;
+    const at = candidates.indexOf(sel);
+    const next = candidates[((at < 0 ? (dir > 0 ? -1 : 0) : at) + dir + candidates.length) % candidates.length]!;
+    if (next === sel) return false;
+    setPendingFind({ path: files[next]!.path, at: dir > 0 ? "first" : "last" });
+    setSel(next);
+    return true;
+  };
+
+  // ---- Go to definition / find references ----
+  const [symbol, setSymbol] = useState<SymbolRequest | null>(null);
+  const [reveal, setReveal] = useState<{ path: string; ri: number; n: number } | null>(null);
+  const [inspectAt, setInspectAt] = useState<{ path: string; line: number } | null>(null);
+  const requestSymbol = (name: string, origin: SymbolRequest["origin"], mode: SymbolRequest["mode"]) =>
+    setSymbol((prev) => ({ name, origin, mode, n: (prev?.n ?? 0) + 1 }));
+  const openLocation = (loc: SymbolLocation) => {
+    const index = files.findIndex((x) => x.path === loc.path);
+    if (loc.ri !== undefined && index >= 0) {
+      setSel(index);
+      setReveal((prev) => ({ path: loc.path, ri: loc.ri!, n: (prev?.n ?? 0) + 1 }));
+    } else {
+      setInspectAt({ path: loc.path, line: loc.line });
+    }
+  };
+  useEffect(() => {
+    if (!symbol) return;
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented && !document.querySelector(".overlay:not([inert])") && !(e.target instanceof Element && e.target.closest(".find-bar, .inline-annotation, .review-context-menu"))) setSymbol(null);
+    };
+    window.addEventListener("keydown", esc);
+    return () => window.removeEventListener("keydown", esc);
+  }, [symbol]);
+
+  const fileRow = (file: DiffFileEntry, i: number, depth?: number) => {
+    const s = reviews?.files[file.path];
+    const st = s ? fileStatus(s) : "not-started";
+    const pct = s ? progress(s) : 0;
+    const count = showCounts ? fileCounts.get(i) : undefined;
+    const name = file.path.split("/").pop();
+    return (
+      <div key={file.path} role="treeitem" aria-selected={i === sel} aria-level={depth === undefined ? undefined : depth + 1} className={`tree-row ${i === sel ? "active" : ""} ${showCounts && !count ? "dim" : ""}`}
+        style={depth === undefined ? undefined : { paddingLeft: 8 + depth * 14 }} onClick={() => setSel(i)} title={`${file.path} — ${st}`}>
+        <span style={{ width: 14, flex: "none", color: st === "complete" ? "var(--ok)" : st === "needs-rereview" ? "var(--err)" : st === "incomplete" ? "var(--warn)" : "var(--text-3)" }} aria-label={st}>
+          {STATUS_ICON[st]}
+        </span>
+        <span className="grow ellipsis">
+          {name}
+          {depth === undefined && <span className="faint small"> {file.path.split("/").slice(0, -1).join("/")}</span>}
+        </span>
+        {count ? <span className="chip find-count" title={`${count} match${count > 1 ? "es" : ""}`}>{count}</span> : null}
+        {notePaths.includes(file.path) && <span className="file-annotation-marker note" title="Private note" aria-label="Private note">N</span>}
+        {commentPaths.has(file.path) && <span className="file-annotation-marker comment" title="GitHub review comment" aria-label="GitHub review comment">C</span>}
+        {file.gitlink && <span className="chip info">sub</span>}
+        <span className="faint small">{Math.round(pct * 100)}%</span>
+      </div>
+    );
+  };
+
+  const treeRows = useMemo(() => {
+    if (view !== "tree") return [];
+    // While filtering, show every matching file with its folders expanded.
+    const effective = filter ? new Set<string>() : collapsed;
+    return visibleTreeRows(tree, effective).filter((n) => (n.kind === "file" ? visibleSet.has(n.index) : n.files.some((i) => visibleSet.has(i))));
+  }, [view, tree, collapsed, filter, visibleSet]);
 
   return (
+    <>
     <Split id="review-files" initial={0.22}>
-      <div className="col" style={{ height: "100%", gap: 0 }}>
+      <div className="col review-file-list" style={{ height: "100%", gap: 0 }} aria-label="Changed files">
+        <div className="review-file-list-head">
+          <span>Files changed · {files.length}</span>
+          <DiffStat compact additions={files.reduce((n, x) => n + x.additions, 0)} deletions={files.reduce((n, x) => n + x.deletions, 0)} />
+          <span className="spacer" />
+          <div className="seg-toggle" role="group" aria-label="File list layout">
+            <button type="button" className={view === "list" ? "on" : ""} aria-pressed={view === "list"} onClick={() => changeView("list")} title="Flat list"><NavIcon name="list" /></button>
+            <button type="button" className={view === "tree" ? "on" : ""} aria-pressed={view === "tree"} onClick={() => changeView("tree")} title="Folder tree"><NavIcon name="tree" /></button>
+          </div>
+        </div>
         <div className="toolbar">
-          <input className="input grow" placeholder="Filter files" aria-label="Filter files" value={filter}
+          <input ref={filterInput} className="input grow" data-workspace-search placeholder="Filter files" aria-label="Filter files" value={filter}
             onKeyDown={(e) => {
               if (e.key !== "Enter" && e.key !== "Escape") return;
               e.preventDefault();
               e.stopPropagation();
-              if (e.key === "Enter" && visible.length && !visible.some(({ i }) => i === sel)) setSel(visible[0]!.i);
+              if (e.key === "Enter" && order.length && !order.includes(sel)) setSel(order[0]!);
               e.currentTarget.blur();
             }} onChange={(e) => setFilter(e.target.value)} />
+          {view === "tree" && !filter && (
+            <button className="btn ghost sm" title={collapsed.size ? "Expand all folders" : "Collapse all folders"}
+              onClick={() => saveCollapsed(collapsed.size ? new Set() : new Set(visibleTreeRows(tree, new Set()).filter((n) => n.kind === "folder").map((n) => n.path)))}>
+              {collapsed.size ? "Expand" : "Collapse"}
+            </button>
+          )}
         </div>
-        <div style={{ overflow: "auto", flex: 1, padding: 4 }} role="tree">
-          {visible.map(({ f: file, i }) => {
-            const s = reviews?.files[file.path];
-            const st = s ? fileStatus(s) : "not-started";
-            const pct = s ? progress(s) : 0;
-            return (
-              <div key={file.path} role="treeitem" aria-selected={i === sel} className={`tree-row ${i === sel ? "active" : ""}`} onClick={() => setSel(i)} title={`${file.path} — ${st}`}>
-                <span style={{ width: 14, color: st === "complete" ? "var(--ok)" : st === "needs-rereview" ? "var(--err)" : st === "incomplete" ? "var(--warn)" : "var(--text-3)" }} aria-label={st}>
-                  {STATUS_ICON[st]}
-                </span>
-                <span className="grow ellipsis">
-                  {file.path.split("/").pop()}
-                  <span className="faint small"> {file.path.split("/").slice(0, -1).join("/")}</span>
-                </span>
-                {file.gitlink && <span className="chip info">sub</span>}
-                <span className="faint small">{Math.round(pct * 100)}%</span>
-              </div>
-            );
-          })}
+        {showCounts && <div className="find-summary small">{totalAll ? `${totalAll.toLocaleString()} match${totalAll > 1 ? "es" : ""} in ${fileCounts.size} file${fileCounts.size > 1 ? "s" : ""}` : "No matches in any file"}</div>}
+        <div style={{ overflow: "auto", flex: 1, padding: 4 }} role="tree" aria-label={view === "tree" ? "Changed files by folder" : "Changed files"}>
+          {view === "list" && order.map((i) => fileRow(files[i]!, i))}
+          {view === "tree" && treeRows.map((n) => n.kind === "file" ? fileRow(files[n.index]!, n.index, n.depth) : (
+            <div key={`dir:${n.path}`} role="treeitem" aria-expanded={filter ? true : !collapsed.has(n.path)} aria-level={n.depth + 1} className="tree-row tree-folder"
+              style={{ paddingLeft: 8 + n.depth * 14 }} title={n.path}
+              onClick={() => { if (filter) return; const next = new Set(collapsed); if (next.has(n.path)) next.delete(n.path); else next.add(n.path); saveCollapsed(next); }}>
+              <span className={`tree-chevron ${filter || !collapsed.has(n.path) ? "open" : ""}`}><NavIcon name="chevron" /></span>
+              <span className="grow ellipsis">{n.name}</span>
+              {showCounts && (() => { const c = n.files.reduce((a, i) => a + (fileCounts.get(i) ?? 0), 0); return c ? <span className="chip find-count">{c}</span> : null; })()}
+              <span className="faint small">{n.files.filter((i) => reviews?.files[files[i]!.path] && fileStatus(reviews.files[files[i]!.path]!) === "complete").length}/{n.files.length}</span>
+            </div>
+          ))}
+          {!order.length && <div className="empty small">No files match “{filter}”.</div>}
         </div>
       </div>
-      {f ? <FilePane key={`${f.path}:${pr.headSha}`} pr={pr} diff={diff} file={f} comments={comments} mode={mode} setMode={(m) => { setMode(m); localStorage.setItem("nl:diffmode", m); }} /> : <div className="empty">No files</div>}
+      <Split id="review-symbols" vertical initial={0.68} min={0.2} showSecond={!!symbol}>
+        {f ? <FilePane key={`${f.path}:${pr.headSha}`} pr={pr} diff={diff} file={f} comments={comments} onAsk={onAsk} layout={layout} setLayout={setLayout} mode={mode} setMode={(m) => { setMode(m); localStorage.setItem("nl:diffmode", m); }}
+          find={find} setFind={setFind} pendingFind={pendingFind?.path === f.path ? pendingFind.at : null} clearPendingFind={() => setPendingFind(null)} onFindEdge={findEdge}
+          allMatches={showCounts ? totalAll : null}
+          reveal={reveal?.path === f.path ? reveal : null}
+          onSymbol={requestSymbol} /> : <div className="empty">No files</div>}
+        {symbol ? <SymbolPanel pr={pr} diff={diff} request={symbol} onOpen={openLocation} onClose={() => setSymbol(null)} /> : <div />}
+      </Split>
     </Split>
+    {inspectAt && f && <FileInspector pr={pr} diff={diff} file={f} at={inspectAt} onClose={() => setInspectAt(null)} />}
+    </>
   );
 }
 
-function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot; diff: LoadedDiff; file: DiffFileEntry; comments: RawReviewComment[]; mode: DiffMode; setMode: (m: DiffMode) => void }) {
+function FilePane({ pr, diff, file, comments, layout, setLayout, mode, setMode, onAsk, find, setFind, pendingFind, clearPendingFind, onFindEdge, allMatches, reveal, onSymbol }: {
+  pr: PRSnapshot; diff: LoadedDiff; file: DiffFileEntry; comments: RawReviewComment[]; layout: DiffCodeLayout; setLayout: (layout: DiffCodeLayout) => void; mode: DiffMode; setMode: (m: DiffMode) => void; onAsk: (target: AskTarget) => void;
+  find: FindState; setFind: React.Dispatch<React.SetStateAction<FindState>>; pendingFind: "first" | "last" | null; clearPendingFind: () => void; onFindEdge: (dir: 1 | -1) => boolean; allMatches: number | null;
+  reveal: { ri: number; n: number } | null;
+  onSymbol: (name: string, origin: SymbolRequest["origin"], mode: SymbolRequest["mode"]) => void;
+}) {
   const section = useMemo(() => fileSectionOf(diff, file), [diff, file]);
   const hunks = useMemo(() => parseFileHunks(section), [section]);
   const progressRec = useApp((s) => s.reviews[pr.key]);
@@ -120,14 +284,47 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
   const put = useApp((s) => s.put);
   const toast = useApp((s) => s.toast);
   const [selection, setSelection] = useState<Interval | null>(null);
+  const [selectedSide, setSelectedSide] = useState<DiffSide>();
+  const selectionSide = mode === "split" ? selectedSide : undefined;
+  const allRows = useMemo(() => hunks.flatMap((h) => h.lines), [hunks]);
+  const selectedLines = useMemo(() => selection
+    ? allRows.slice(...selection).filter((line) => line.kind !== "meta" && onDiffSide(line, selectionSide))
+    : [], [allRows, selection, selectionSide]);
   const [anchorLine, setAnchorLine] = useState<DiffLine | null>(null);
+  const [fileHash, setFileHash] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void crypto.subtle?.digest("SHA-256", new TextEncoder().encode(file.path)).then((digest) => {
+      if (active) setFileHash(Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join(""));
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [file.path]);
+  const lineAnchor = (line: DiffLine) => {
+    if (selectedSide === "LEFT" && line.oldNo !== null) return `L${line.oldNo}`;
+    if (line.newNo !== null) return `R${line.newNo}`;
+    return `L${line.oldNo}`;
+  };
+  const firstLine = selectedLines[0];
+  const lastLine = selectedLines.at(-1);
+  const copyGitHubLink = async () => {
+    if (!fileHash || !firstLine || !lastLine) return;
+    const url = new URL(pr.url);
+    url.pathname = url.pathname.replace(/\/$/, "") + "/files";
+    url.search = "";
+    const start = lineAnchor(firstLine);
+    const end = lineAnchor(lastLine);
+    url.hash = `diff-${fileHash}${start}${end === start ? "" : "-" + end}`;
+    const copied = await copyText(url.href);
+    toast(copied ? "info" : "error", copied ? "GitHub link copied" : "Could not copy the GitHub link.");
+  };
+
   const [composer, setComposer] = useState<null | "note" | "comment">(null);
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; word?: { name: string; origin: NonNullable<SymbolRequest["origin"]> } } | null>(null);
   const [showNotes, setShowNotes] = useState(() => localStorage.getItem("nl:inline-notes") !== "false");
   const [showComments, setShowComments] = useState(() => localStorage.getItem("nl:inline-comments") !== "false");
   const [showRail, setShowRail] = useState(() => localStorage.getItem("nl:review-notes-pane") === "true");
   const [closedAnnotations, setClosedAnnotations] = useState<Set<string>>(() => new Set());
-  const annotation = (id: string, label: string, body: string, url?: string) =>
+  const annotation = (id: string, label: string, body: string, url?: string, actions?: React.ReactNode) =>
     <details key={id} className="panel inline-annotation" open={!closedAnnotations.has(id)} onToggle={(e) => {
       const open = e.currentTarget.open;
       setClosedAnnotations((previous) => {
@@ -137,7 +334,8 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
         else next.add(id);
         return next;
       });
-    }}><summary>{label}</summary><div>{body}</div>{url && <a href={url} target="_blank" rel="noreferrer">View on GitHub ↗</a>}</details>;
+    }}><summary>{label}</summary>{actions && <div className="annotation-actions">{actions}</div>}
+      <div>{body}</div>{url && <a href={url} target="_blank" rel="noreferrer">View on GitHub ↗</a>}</details>;
   useEffect(() => {
     const escape = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !document.querySelector(".overlay:not([inert]), #workspace-content[inert]")) {
@@ -155,11 +353,168 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
     window.addEventListener("pointerdown", dismiss);
     return () => window.removeEventListener("pointerdown", dismiss);
   }, [menu]);
+  // Click anywhere outside the selected lines (and selection tools) clears the selection.
+  useEffect(() => {
+    if (!selection) return;
+    const away = (e: MouseEvent) => {
+      if (!(e.target instanceof Element) || e.button !== 0) return;
+      if (window.getSelection()?.toString()) return; // user is selecting text to copy
+      if (e.target.closest(".dl.sel, .dl .no, .diff-annotation, .review-context-menu, .selection-bar, .rail, [data-keep-selection], .overlay, .modal, .inline-annotation")) return;
+      setSelection(null);
+      setComposer(null);
+    };
+    window.addEventListener("click", away);
+    return () => window.removeEventListener("click", away);
+  }, [selection]);
   const [scrollTo, setScrollTo] = useState<number | null>(null);
   const [expansions, setExpansions] = useState(new Map<number, { lines: string[]; startNo: number; label?: string }>());
   const [inspector, setInspector] = useState(false);
   const [impact, setImpact] = useState(false);
   const [sub, setSub] = useState(false);
+  useEffect(() => {
+    if (!selectedLines.length || sub) return;
+    const text = selectedLines.map((line) => line.text).join("\n");
+    const canCopyReview = () =>
+      !document.getSelection()?.toString() &&
+      !document.activeElement?.closest('input, textarea, [contenteditable]:not([contenteditable="false"])') &&
+      !document.querySelector(".overlay:not([inert]), #workspace-content[inert]");
+    const onCopy = (event: ClipboardEvent) => {
+      if (event.defaultPrevented || !event.clipboardData || !canCopyReview()) return;
+      event.clipboardData.setData("text/plain", text);
+      event.preventDefault();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey ||
+          event.key.toLowerCase() !== "c" || !canCopyReview()) return;
+      // The synchronous copy event also works in webviews where the async Clipboard API is unavailable.
+      try {
+        if (document.execCommand("copy")) {
+          event.preventDefault();
+          return;
+        }
+      } catch { /* Continue with the async Clipboard API when available. */ }
+      if (!navigator.clipboard) return;
+      event.preventDefault();
+      void navigator.clipboard.writeText(text).catch(() => toast("error", "Could not copy the selected lines."));
+    };
+    window.addEventListener("copy", onCopy);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("copy", onCopy);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [selectedLines, sub, toast]);
+
+  // ---- Find in this file ----
+  const findIndex = useMemo(() => buildFindIndex(allRows.map((line) => line.text)), [allRows]);
+  const findQuery = useDeferredValue(find.open ? find.query : "");
+  const findRes = useMemo(() => findInIndex(findIndex, findQuery, { caseSensitive: find.caseSensitive, wholeWord: find.wholeWord, regex: find.regex }),
+    [findIndex, findQuery, find.caseSensitive, find.wholeWord, find.regex]);
+  const findByRow = useMemo(() => matchesByRow(findRes), [findRes]);
+  const [findCur, setFindCur] = useState(-1);
+  const [localReveal, setLocalReveal] = useState<{ ri: number; n: number } | null>(reveal);
+  const revealRow = (ri: number) => setLocalReveal((prev) => ({ ri, n: (prev?.n ?? 0) + 1 }));
+  const goToMatch = (i: number) => {
+    if (i < 0 || i >= findRes.rows.length) return;
+    setFindCur(i);
+    revealRow(findRes.rows[i]!);
+  };
+  // New results: start at the first match at/after the current position (or where a cross-file jump asked).
+  useEffect(() => {
+    if (!findRes.rows.length) { setFindCur(-1); return; }
+    if (pendingFind) {
+      goToMatch(pendingFind === "first" ? 0 : findRes.rows.length - 1);
+      clearPendingFind();
+      return;
+    }
+    const from = selection?.[0] ?? localReveal?.ri ?? 0;
+    goToMatch(nextMatch(findRes, from, -1));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [findRes]);
+  const findStep = (dir: 1 | -1) => {
+    const n = findRes.rows.length;
+    if (!n) { onFindEdge(dir); return; }
+    const next = findCur + dir;
+    if ((next >= n || next < 0) && onFindEdge(dir)) return;
+    goToMatch((next + n) % n);
+  };
+  // Parent asked to reveal a row (symbol navigation): select it and scroll there.
+  useEffect(() => {
+    if (!reveal) return;
+    setSelectedSide(undefined);
+    setSelection([reveal.ri, reveal.ri + 1]);
+    revealRow(reveal.ri);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal?.n]);
+
+  const codeArea = useRef<HTMLDivElement>(null);
+  const codeFocused = useRef(false);
+  const findInput = useRef<HTMLInputElement>(null);
+  useEffect(() => { if (find.open) { findInput.current?.focus(); findInput.current?.select(); } }, [find.focus]);
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      const t = e.target instanceof Node ? e.target : null;
+      codeFocused.current = !!t && (!!codeArea.current?.contains(t) || !!(t instanceof Element && t.closest(".find-bar, .symbol-panel")));
+    };
+    const key = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      const inCode = codeFocused.current || !!(document.activeElement && codeArea.current?.contains(document.activeElement)) || !!document.activeElement?.closest(".find-bar");
+      if (mod && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "f" && inCode && !document.querySelector(".overlay:not([inert])")) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        const picked = window.getSelection()?.toString() ?? "";
+        const seed = picked && !picked.includes("\n") && picked.length < 200 && codeArea.current?.contains(window.getSelection()!.anchorNode) ? picked : null;
+        setFind((f) => ({ ...f, open: true, query: seed ?? f.query, focus: f.focus + 1 }));
+        return;
+      }
+      if (find.open && ((mod && e.key.toLowerCase() === "g") || e.key === "F3")) {
+        e.preventDefault();
+        findStep(e.shiftKey ? -1 : 1);
+        return;
+      }
+      if ((e.key === "F12") && inCode) {
+        const word = selectedWord();
+        if (word) { e.preventDefault(); onSymbol(word.name, word.origin, e.shiftKey ? "references" : "definition"); }
+      }
+    };
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("keydown", key, true);
+    return () => { window.removeEventListener("pointerdown", down, true); window.removeEventListener("keydown", key, true); };
+  });
+
+  /** Identifier at a click inside a code cell. */
+  const wordFromEvent = (e: React.MouseEvent, line: DiffLine): { name: string; origin: NonNullable<SymbolRequest["origin"]> } | null => {
+    const code = e.target instanceof Element ? e.target.closest(".code") : null;
+    if (!code) return null;
+    const col = columnAtPoint(e.clientX, e.clientY, code);
+    if (col == null) return null;
+    const id = identifierAt(line.text, col);
+    if (!id) return null;
+    const side = line.newNo != null ? "new" as const : "old" as const;
+    return { name: id.name, origin: { path: file.path, line: (side === "new" ? line.newNo! : line.oldNo!) - 1, col: id.start, side } };
+  };
+  /** Identifier in the current text selection inside the code (for F12). */
+  const selectedWord = () => {
+    const sel = window.getSelection();
+    const text = sel?.toString().trim() ?? "";
+    if (!sel || !text || !codeArea.current?.contains(sel.anchorNode)) return null;
+    const id = identifierAt(text, 0);
+    if (!id || id.name !== text) return null;
+    const row = sel.anchorNode?.parentElement?.closest(".dl");
+    const no = row?.querySelectorAll(".no");
+    const newNo = Number(no?.[no.length - 1]?.textContent || NaN);
+    return { name: id.name, origin: Number.isFinite(newNo) ? { path: file.path, line: newNo - 1, col: 0, side: "new" as const } : undefined };
+  };
+  const [modHeld, setModHeld] = useState(false);
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => setModHeld(e.metaKey || e.ctrlKey);
+    const blur = () => setModHeld(false);
+    window.addEventListener("keydown", k);
+    window.addEventListener("keyup", k);
+    window.addEventListener("blur", blur);
+    return () => { window.removeEventListener("keydown", k); window.removeEventListener("keyup", k); window.removeEventListener("blur", blur); };
+  }, []);
+
   const starts = useMemo(() => hunkStarts(hunks), [hunks]);
   const st = fileStatus(state);
   const save = (s: FileReviewState) => saveFileState(pr, s);
@@ -172,12 +527,31 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
   };
   const hunkRange = (h: number): Interval => [starts[h]!, (starts[h + 1] ?? starts[h]! + hunks[h]!.lines.length)];
 
+  const changeSelection = (change: (file: FileReviewState, range: Interval) => FileReviewState, fallback?: Interval) => {
+    const range = selection ?? fallback;
+    if (!range) return;
+    if (!selectionSide || !selection) {
+      save(change(state, range));
+      return;
+    }
+    let next = state;
+    let start = range[0];
+    while (start < range[1]) {
+      if (!onDiffSide(allRows[start]!, selectionSide)) { start++; continue; }
+      let end = start + 1;
+      while (end < range[1] && onDiffSide(allRows[end]!, selectionSide)) end++;
+      next = change(next, [start, end]);
+      start = end;
+    }
+    save(next);
+  };
+
   useActions(
     {
-      nextHunk: () => { const h = Math.min(hunks.length - 1, curHunk() + 1); setScrollTo(starts[h]!); setSelection(hunkRange(h)); },
-      prevHunk: () => { const h = Math.max(0, curHunk() - 1); setScrollTo(starts[h]!); setSelection(hunkRange(h)); },
-      markReviewed: () => save(markReviewed(state, selection ?? hunkRange(curHunk()))),
-      flag: () => selection && save(flagRange(state, selection)),
+      nextHunk: () => { const h = Math.min(hunks.length - 1, curHunk() + 1); setScrollTo(starts[h]!); setSelectedSide(undefined); setSelection(hunkRange(h)); },
+      prevHunk: () => { const h = Math.max(0, curHunk() - 1); setScrollTo(starts[h]!); setSelectedSide(undefined); setSelection(hunkRange(h)); },
+      markReviewed: () => changeSelection(markReviewed, hunks.length ? hunkRange(curHunk()) : undefined),
+      flag: () => changeSelection(flagRange),
       comment: () => selection && setComposer("comment"),
       impact: () => setImpact(true),
     },
@@ -202,21 +576,20 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
     }
   };
   const onExpand = async (hi: number, h: Hunk) => {
+    if (expansions.has(hi)) {
+      setExpansions((old) => { const next = new Map(old); next.delete(hi); return next; });
+      return;
+    }
     const lines = await loadFull();
     if (!lines) return;
     const top = h.newStart - 1; // 0-based index of first hunk line in new file
     const prevEnd = hi > 0 ? hunks[hi - 1]!.newStart - 1 + hunks[hi - 1]!.newLines : 0;
-    const cur = expansions.get(hi);
-    const from = cur ? cur.startNo - 1 : top;
-    const res = await expandToEnclosing(file.path, lines, Math.max(0, from - 1), 400);
-    const start = Math.max(prevEnd, res.start);
-    const next = new Map(expansions);
+    if (top <= prevEnd) return;
+    const res = await expandToEnclosing(file.path, lines, top - 1, 400);
+    const start = Math.max(prevEnd, Math.min(top - 1, res.start));
     const label = res.engine === "tree-sitter" ? `tree-sitter: ${res.label}` : res.engine === "heuristic" ? `heuristic fallback: ${res.label ?? "block"}` : "bounded lines (no semantic boundary found)";
-    next.set(hi, { lines: lines.slice(start, top), startNo: start + 1, label: res.capped ? `${label} (capped; expand again for more)` : label });
-    setExpansions(next);
+    setExpansions((old) => new Map(old).set(hi, { lines: lines.slice(start, top), startNo: start + 1, label }));
   };
-
-  const allRows = useMemo(() => hunks.flatMap((h) => h.lines), [hunks]);
 
   const saveAnnotation = (body: string) => {
     if (!selection || !composer) return;
@@ -230,19 +603,21 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
         body, orphaned: false, createdAt: Date.now(), updatedAt: Date.now(),
       };
       put("notes", n.id, n);
+      void signalReviewStart(pr);
     } else {
-      const last = allRows[selection[1] - 1] ?? anchorLine;
-      const first = allRows[selection[0]];
-      const side = last?.kind === "del" ? "LEFT" : "RIGHT";
+      const last = selectedLines.at(-1) ?? anchorLine;
+      const first = selectedLines[0];
+      const side = selectionSide ?? (last?.kind === "del" ? "LEFT" : "RIGHT");
       const line = side === "LEFT" ? last?.oldNo : last?.newNo;
       const startLine = side === "LEFT" ? first?.oldNo : first?.newNo;
-      if (line == null || (selection[1] - selection[0] > 1 && (startLine == null || startLine >= line))) {
+      if (line == null || (selectedLines.length > 1 && (startLine == null || startLine >= line))) {
         toast("warn", "Select a continuous range on one side of the diff for a GitHub comment.");
         return;
       }
       const draft: DraftComment = { id: newId("draft"), prKey: pr.key, headSha: pr.headSha, path: file.path, line, side, startLine: first !== last ? startLine ?? undefined : undefined, body, createdAt: Date.now() };
       put("drafts", draft.id, draft);
       toast("info", "Draft saved. It will be posted when you submit your review.");
+      void signalReviewStart(pr);
     }
     setComposer(null);
   };
@@ -258,12 +633,14 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
   if (showNotes) {
     for (const n of notes) if (n.anchor && !n.orphaned) {
       const [start, end] = n.anchor.rows;
-      annotate(end - 1, annotation(n.id, `Private note · diff rows ${start + 1}–${end}`, n.body));
+      annotate(end - 1, annotation(n.id, `Private note · diff rows ${start + 1}–${end}`, n.body, undefined,
+        <button type="button" className="btn ghost sm" onClick={() => useApp.getState().remove("notes", n.id)} aria-label="Delete private note" title="Delete private note"><NavIcon name="trash" /></button>));
     }
   }
   if (showComments) {
     for (const d of drafts) if (d.headSha === pr.headSha) {
-      annotate(lineIndex(d.line, d.side), annotation(d.id, `Draft GitHub comment · ${d.startLine ? d.startLine + "–" : ""}${d.line}`, d.body));
+      annotate(lineIndex(d.line, d.side), annotation(d.id, `Draft GitHub comment · ${d.startLine ? d.startLine + "–" : ""}${d.line}`, d.body, undefined,
+        <button type="button" className="btn ghost sm" onClick={() => useApp.getState().remove("drafts", d.id)} aria-label="Discard draft comment"><NavIcon name="close" /></button>));
     }
     for (const c of comments) if (c.path === file.path && c.line != null) {
       annotate(lineIndex(c.line, c.side), annotation(`github:${c.id}`, `${c.user?.login ?? "GitHub"} · line ${c.start_line ? c.start_line + "–" : ""}${c.line}`, c.body, c.html_url));
@@ -275,15 +652,37 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
 
   const openComposer = (kind: "note" | "comment") => {
     setComposer(kind);
-    if (selection) setScrollTo(selection[1] - 1);
   };
 
+  const lineText = (l: DiffLine) => `${l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "}${l.newNo ?? l.oldNo ?? ""}\t${l.text}`;
+  const openAsk = (range: Interval | null) => {
+    const iv = range ?? (hunks.length ? hunkRange(curHunk()) : null);
+    if (!iv) return;
+    const pick = range ? selectedLines : allRows.slice(iv[0], iv[1]);
+    const nums = pick.map((l) => l.newNo ?? l.oldNo).filter((n): n is number => n != null);
+    onAsk({
+      repoKey: `${pr.owner}/${pr.repo}`.toLowerCase(),
+      prKey: pr.key,
+      prTitle: pr.title,
+      prUrl: pr.url,
+      path: file.path,
+      label: nums.length ? (nums[0] === nums.at(-1) ? `line ${nums[0]}` : `lines ${nums[0]}–${nums.at(-1)}`) : `rows ${iv[0] + 1}–${iv[1]}`,
+      selected: pick.map(lineText).join("\n"),
+      context: allRows.slice(Math.max(0, iv[0] - 40), iv[1] + 40).map(lineText).join("\n"),
+    });
+  };
+
+  const symbolActions = menu?.word ? [
+    { label: `Go to definition of ${menu.word.name}`, run: () => onSymbol(menu.word!.name, menu.word!.origin, "definition") },
+    { label: `Find references to ${menu.word.name}`, run: () => onSymbol(menu.word!.name, menu.word!.origin, "references") },
+  ] : [];
   const actions = selection ? [
-    { label: "Mark reviewed", run: () => save(markReviewed(state, selection)) },
-    { label: "Needs revisit", run: () => save(flagRange(state, selection)) },
-    { label: "Clear flag", run: () => save(unflagRange(state, selection)) },
+    { label: "Mark reviewed", run: () => changeSelection(markReviewed) },
+    { label: "Needs revisit", run: () => changeSelection(flagRange) },
+    { label: "Clear flag", run: () => changeSelection(unflagRange) },
     { label: "Private note", run: () => openComposer("note") },
     { label: "GitHub comment", run: () => openComposer("comment") },
+    { label: "✦ Ask AI about this", run: () => openAsk(selection) },
   ] : [];
 
   return (
@@ -294,9 +693,7 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
           {file.path}
         </span>
         <span className="chip">{file.kind}</span>
-        <span className="chip">
-          +{file.additions} −{file.deletions}
-        </span>
+        <DiffStat additions={file.additions} deletions={file.deletions} />
         <span className={`chip ${st === "complete" ? "ok" : st === "needs-rereview" ? "err" : st === "incomplete" ? "warn" : ""}`}>
           {STATUS_ICON[st]} {st}
         </span>
@@ -304,6 +701,7 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
           <span style={{ left: 0, width: `${progress(state) * 100}%`, background: "var(--ok)" }} />
         </div>
         <span className="spacer" />
+        <DiffCodeLayoutSelect layout={layout} onChange={setLayout} />
         <select className="input" value={mode} onChange={(e) => setMode(e.target.value as DiffMode)} aria-label="Diff mode">
           <option value="unified">Unified</option>
           <option value="split">Side-by-side</option>
@@ -317,6 +715,9 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
         <label className="small row"><input type="checkbox" checked={showNotes} onChange={(e) => { setShowNotes(e.target.checked); localStorage.setItem("nl:inline-notes", String(e.target.checked)); }} /> Inline notes</label>
         <label className="small row"><input type="checkbox" checked={showComments} onChange={(e) => { setShowComments(e.target.checked); localStorage.setItem("nl:inline-comments", String(e.target.checked)); }} /> Inline comments</label>
         <button className="btn sm" aria-pressed={showRail} onClick={() => { setShowRail(!showRail); localStorage.setItem("nl:review-notes-pane", String(!showRail)); }}>Notes pane</button>
+        <button className="btn sm" data-keep-selection onClick={() => openAsk(selection)} title={selection ? "Ask an AI model about the selected lines" : "Ask an AI model about the current hunk (select lines first to narrow it)"}>
+          ✦ Ask AI
+        </button>
         <button className="btn sm" onClick={() => setInspector(true)}>
           ⛶ Inspect
         </button>
@@ -330,18 +731,46 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
         )}
       </div>
       <FileSummary pr={pr} file={file} section={section} />
+      {find.open && (
+        <div className="find-bar" role="search" aria-label="Find in code">
+          <NavIcon name="search" />
+          <input ref={findInput} className={`input grow mono ${find.query && !findRes.total && !findRes.error && !allMatches ? "no-match" : ""}`} aria-label="Find in code" placeholder={find.scope === "all" ? "Find in all changed files" : "Find in this file"}
+            value={find.query} spellCheck={false}
+            onChange={(e) => setFind((f) => ({ ...f, query: e.target.value }))}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); findStep(e.shiftKey ? -1 : 1); }
+              if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); setFind((f) => ({ ...f, open: false })); codeFocused.current = true; }
+            }} />
+          <span className="find-count-label small" aria-live="polite">
+            {findRes.error ? <span className="err-text" title={findRes.error}>invalid regex</span>
+              : !find.query ? "" : findRes.total ? `${findCur + 1} of ${findRes.total.toLocaleString()}${findRes.capped ? "+" : ""}${allMatches ? ` · ${allMatches.toLocaleString()} in all files` : ""}`
+              : allMatches ? `0 here · ${allMatches.toLocaleString()} in other files` : "No results"}
+          </span>
+          <button type="button" className={`btn sm find-opt ${find.caseSensitive ? "on" : ""}`} aria-pressed={find.caseSensitive} title="Match case" aria-label="Match case" onClick={() => setFind((f) => ({ ...f, caseSensitive: !f.caseSensitive }))}>Aa</button>
+          <button type="button" className={`btn sm find-opt ${find.wholeWord ? "on" : ""}`} aria-pressed={find.wholeWord} title="Whole word" aria-label="Whole word" onClick={() => setFind((f) => ({ ...f, wholeWord: !f.wholeWord }))}><u>ab</u></button>
+          <button type="button" className={`btn sm find-opt ${find.regex ? "on" : ""}`} aria-pressed={find.regex} title="Regular expression" aria-label="Regular expression" onClick={() => setFind((f) => ({ ...f, regex: !f.regex }))}>.*</button>
+          <select className="input" aria-label="Search scope" value={find.scope} onChange={(e) => setFind((f) => ({ ...f, scope: e.target.value as FindState["scope"] }))}>
+            <option value="file">This file</option>
+            <option value="all">All changed files</option>
+          </select>
+          <button type="button" className="btn sm" onClick={() => findStep(-1)} title="Previous match (⇧↵)" aria-label="Previous match">↑</button>
+          <button type="button" className="btn sm" onClick={() => findStep(1)} title="Next match (↵)" aria-label="Next match">↓</button>
+          <button type="button" className="btn ghost sm" onClick={() => setFind((f) => ({ ...f, open: false }))} aria-label="Close find" title="Close (Esc)"><NavIcon name="close" /></button>
+        </div>
+      )}
+      <div className="selection-slot">
       {selection && (
-        <div className="toolbar small" style={{ background: "var(--accent-2)" }}>
+        <div className="toolbar small selection-bar">
           <span>
             Rows {selection[0] + 1}–{selection[1]} selected
           </span>
-          <button className="btn sm" onClick={() => save(markReviewed(state, selection))}>
+          <button className="btn sm" onClick={() => changeSelection(markReviewed)}>
             r Mark reviewed
           </button>
-          <button className="btn sm" onClick={() => save(flagRange(state, selection))}>
+          <button className="btn sm" onClick={() => changeSelection(flagRange)}>
             x Needs revisit
           </button>
-          <button className="btn sm" onClick={() => save(unflagRange(state, selection))}>
+          <button className="btn sm" onClick={() => changeSelection(unflagRange)}>
             Clear flag
           </button>
           <button className="btn sm" onClick={() => openComposer("note")}>
@@ -350,41 +779,65 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
           <button className="btn sm" onClick={() => openComposer("comment")}>
             c GitHub comment
           </button>
+          <button className="btn sm" onClick={() => openAsk(selection)}>
+            ✦ Ask AI
+          </button>
+          <button type="button" className="btn sm" onClick={() => void copyGitHubLink()} disabled={!fileHash || !firstLine}
+            title="Copy a direct link to these lines on GitHub"><NavIcon name="copy" /> Copy GitHub link</button>
           <button className="btn ghost sm" onClick={() => setSelection(null)}>
             ✕
           </button>
         </div>
       )}
+      </div>
       <div style={{ flex: 1, minHeight: 0 }}>
         <Split id="review-notes" initial={0.74} min={0.18} showSecond={showRail}>
-        <div className="grow" style={{ height: "100%", minWidth: 0, padding: 4 }}>
+        <div ref={codeArea} className={`grow review-code-area ${modHeld ? "mod-held" : ""}`} style={{ height: "100%", minWidth: 0, padding: 4 }}>
           {sub ? (
-            <SubmoduleExpansion pr={pr} file={file} section={section} mode={mode} />
+            <SubmoduleExpansion pr={pr} file={file} section={section} mode={mode} layout={layout} />
           ) : (
             <FileDiff
+              key={mode}
+              path={file.path}
               section={section}
               mode={mode}
+              layout={layout}
               expansions={expansions}
               onExpand={(hi, h) => void onExpand(hi, h)}
               review={{ state, setFrontier: (row) => save(setFrontier(fileState(useApp.getState().reviews[pr.key], file, section), row)) }}
               selection={selection}
+              selectionSide={selectionSide}
               onSelect={(iv, a) => {
+                setSelectedSide(a.side);
                 setSelection(iv);
                 setComposer(null);
                 setMenu(null);
-                setAnchorLine(a?.line ?? null);
+                setAnchorLine(a.line);
               }}
               annotations={annotations}
-              onLineContext={(e, i, line) => {
+              onLineContext={(e, i, line, side) => {
                 e.preventDefault();
-                if (!selection || i < selection[0] || i >= selection[1]) {
+                if (!selection || i < selection[0] || i >= selection[1] || (selectionSide && side !== selectionSide)) {
+                  setSelectedSide(side);
                   setSelection([i, i + 1]);
                   setComposer(null);
                 }
                 setAnchorLine(line);
-                setMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - 195)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - 176)) });
+                const word = wordFromEvent(e, line) ?? undefined;
+                setMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - 260)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - (word ? 290 : 210))), word });
               }}
               scrollToRow={scrollTo}
+              scrollKey={`nl:review-scroll:${pr.key}:${diff.baseSha}:${diff.headSha}:${mode}:${file.path}`}
+              find={find.open && findRes.rows.length ? { byRow: findByRow, current: findCur >= 0 ? { ri: findRes.rows[findCur]!, col: findRes.cols[findCur]! } : null } : null}
+              reveal={localReveal}
+              onCodeClick={(e, _ri, line) => {
+                if (!(e.metaKey || e.ctrlKey) || window.getSelection()?.toString()) return;
+                const word = wordFromEvent(e, line);
+                if (!word) return;
+                e.preventDefault();
+                e.stopPropagation();
+                onSymbol(word.name, word.origin, "definition");
+              }}
             />
           )}
         </div>
@@ -392,6 +845,8 @@ function FilePane({ pr, diff, file, comments, mode, setMode }: { pr: PRSnapshot;
         </Split>
       </div>
       {menu && <div className="panel review-context-menu" style={{ left: menu.x, top: menu.y }} role="group" aria-label="Diff line actions">
+        {symbolActions.map((action) => <button key={action.label} className="btn ghost ellipsis" onClick={() => { action.run(); setMenu(null); }}>{action.label}</button>)}
+        {symbolActions.length > 0 && actions.length > 0 && <div className="menu-sep" role="separator" />}
         {actions.map((action) => <button key={action.label} className="btn ghost" onClick={() => { action.run(); setMenu(null); }}>{action.label}</button>)}
       </div>}
       {inspector && <FileInspector pr={pr} diff={diff} file={file} onClose={() => setInspector(false)} />}
@@ -424,7 +879,7 @@ function FileSummary({ pr, file, section }: { pr: PRSnapshot; file: DiffFileEntr
         onClick={async () => {
           setBusy(true);
           try {
-            const p = buildFilePrompt(file.path, section, 30_000);
+            const p = buildFilePrompt(file.path, section, 30_000, pr.url);
             await summarize({ prKey: pr.key, repo: repoKey, pr: pr.number, baseSha: pr.baseSha, headSha: pr.headSha, diffHash: hash, file: file.path, modelId: settings.models.find((m) => m.tier === "cheap" && m.provider === settings.models.find((x) => x.id === settings.defaultModel)?.provider)?.id ?? settings.defaultModel, system: p.system, user: p.user, maxOut: 400 });
           } catch (e) {
             toast("error", (e as Error).message);
@@ -451,9 +906,8 @@ function NotesRail({ pr, file, notes, drafts }: { pr: PRSnapshot; file: DiffFile
         <div key={n.id} className="panel pad small" style={{ marginBottom: 6 }}>
           <div className="faint">rows {n.anchor!.rows[0] + 1}–{n.anchor!.rows[1]}</div>
           <div>{n.body}</div>
-          <button className="btn ghost sm" onClick={() => remove("notes", n.id)}>
-            delete
-          </button>
+          <button type="button" className="btn ghost sm" aria-label="Delete private note" title="Delete private note"
+            onClick={() => remove("notes", n.id)}><NavIcon name="trash" /></button>
         </div>
       ))}
       {drafts.length > 0 && <h3 className="h3">Draft GitHub comments</h3>}
@@ -496,7 +950,7 @@ function Composer({ kind, onClose, onSave }: { kind: "note" | "comment"; onClose
 
 /* ---------------- Submodule expansion (§5.1) ---------------- */
 
-function SubmoduleExpansion({ pr, file, section, mode }: { pr: PRSnapshot; file: DiffFileEntry; section: string; mode: DiffMode }) {
+function SubmoduleExpansion({ pr, file, section, mode, layout }: { pr: PRSnapshot; file: DiffFileEntry; section: string; mode: DiffMode; layout: DiffCodeLayout }) {
   const { oldSha, newSha } = gitlinkShas(section);
   const [state, setState] = useState<{ child?: { owner: string; repo: string }; text?: string; err?: string; status?: string; speculative?: string }>({});
   const [sel, setSel] = useState(0);
@@ -545,7 +999,7 @@ function SubmoduleExpansion({ pr, file, section, mode }: { pr: PRSnapshot; file:
             </div>
           ))}
         </div>
-        <div className="grow" style={{ minWidth: 0 }}>{f && <FileDiff key={f.path} section={state.text!.slice(f.start, f.end)} mode={mode} />}</div>
+        <div className="grow" style={{ minWidth: 0 }}>{f && <FileDiff key={f.path} path={f.path} section={state.text!.slice(f.start, f.end)} mode={mode} layout={layout} />}</div>
       </div>
     </div>
   );

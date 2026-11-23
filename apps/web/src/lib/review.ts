@@ -11,9 +11,14 @@ import {
   type PRReviewProgress,
   type ParsedPatchIndex,
   type PRSnapshot,
+  toCommitNode,
+  type CommitNode,
+  type RawIssueComment,
+  type RawReview,
+  type RawReviewComment,
 } from "@nonlinear/core";
 import { getBlob, putBlob } from "./db";
-import { githubApi } from "./github";
+import { githubApi, signalReviewStart } from "./github";
 import { useApp } from "./store";
 
 export interface LoadedDiff {
@@ -68,7 +73,9 @@ export function fileState(p: PRReviewProgress | undefined, f: DiffFileEntry, sec
 export function saveFileState(pr: PRSnapshot, s: FileReviewState): void {
   const st = useApp.getState();
   const cur = st.reviews[progressKey(pr.key)] ?? { prKey: pr.key, headSha: pr.headSha, baseSha: pr.baseSha, phase: "active" as const, files: {}, updatedAt: Date.now() };
-  st.put("reviews", progressKey(pr.key), { ...cur, files: { ...cur.files, [s.path]: s }, updatedAt: Date.now() });
+  st.put("reviews", progressKey(pr.key), { ...cur, phase: "active", files: { ...cur.files, [s.path]: s }, updatedAt: Date.now() });
+  // First private review action on this PR → make it visible on GitHub (once; respects safe mode).
+  void signalReviewStart(pr);
 }
 
 /**
@@ -119,4 +126,46 @@ export function gitlinkShas(section: string): { oldSha: string | null; newSha: s
   const o = /^-Subproject commit ([0-9a-f]{7,40})/m.exec(section);
   const n = /^\+Subproject commit ([0-9a-f]{7,40})/m.exec(section);
   return { oldSha: o?.[1] ?? null, newSha: n?.[1] ?? null };
+}
+
+const pending = new Map<string, Promise<unknown>>();
+
+async function cachedReviewData<T>(key: string, read: () => Promise<T>, ttl?: number, refreshAfter = 0): Promise<T> {
+  const settings = useApp.getState().settings_();
+  key = `review-cache:${settings.apiBase}:${settings.me ?? "anonymous"}:${settings.publicOnly}:${key}`;
+  const cached = await getBlob(key).then((json) => json ? JSON.parse(json) as { at: number; value: T } : undefined).catch(() => undefined);
+  if (cached && (!useApp.getState().online || (cached.at >= refreshAfter && (!ttl || Date.now() - cached.at < ttl)))) return cached.value;
+  const current = pending.get(key);
+  if (current) return current as Promise<T>;
+  const request = read().then(async (value) => {
+    await putBlob(key, JSON.stringify({ at: Date.now(), value })).catch(() => undefined);
+    return value;
+  }).catch((error) => {
+    if (cached) return cached.value;
+    throw error;
+  }).finally(() => pending.delete(key));
+  pending.set(key, request);
+  return request;
+}
+
+export function loadReviewCommits(pr: PRSnapshot): Promise<CommitNode[]> {
+  return cachedReviewData(`commits:${pr.key}:${pr.headSha}`, async () =>
+    (await (await githubApi()).listPullCommits(pr.owner, pr.repo, pr.number)).map(toCommitNode));
+}
+
+export function loadReviewCommitDiff(pr: PRSnapshot, sha: string): Promise<string> {
+  return cachedReviewData(`commit-diff:${pr.owner}/${pr.repo}:${sha}`, async () => (await githubApi()).commitDiff(pr.owner, pr.repo, sha));
+}
+
+const COMMENT_TTL = 5 * 60_000;
+export function loadInlineComments(pr: PRSnapshot, refreshAfter = 0): Promise<RawReviewComment[]> {
+  return cachedReviewData(`inline:${pr.key}:${pr.headSha}`, async () => (await githubApi()).listReviewComments(pr.owner, pr.repo, pr.number), COMMENT_TTL, refreshAfter);
+}
+
+export function loadPRConversation(pr: PRSnapshot, refreshAfter = 0): Promise<[RawIssueComment[], RawReview[], RawReviewComment[]]> {
+  return Promise.all([
+    cachedReviewData(`discussion:${pr.key}`, async () => (await githubApi()).listIssueComments(pr.owner, pr.repo, pr.number), COMMENT_TTL, refreshAfter),
+    cachedReviewData(`reviews:${pr.key}`, async () => (await githubApi()).listReviews(pr.owner, pr.repo, pr.number), COMMENT_TTL, refreshAfter),
+    loadInlineComments(pr, refreshAfter),
+  ]);
 }

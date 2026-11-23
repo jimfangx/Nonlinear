@@ -52,6 +52,7 @@ export interface TimelineView {
   rootSha: string | null; // selected root commit (null = tip of baseRef)
   visiblePaths: string[] | null;
   zoom: Zoom;
+  zoomScale?: number;
   parentTimelineId: string | null;
   pathPrefix: string[]; // path chain from top-level root for nested views
   createdAt: number;
@@ -111,12 +112,40 @@ export interface DiffImportMeta {
   totals: { files: number; additions: number; deletions: number };
 }
 
+/** A GitHub write held back by safe mode until the user reviews it. */
+export interface StagedWrite {
+  id: string;
+  kind: import("@nonlinear/core").IntentionKind;
+  /** PR the write targets, or null for repository-level writes (e.g. release PRs) */
+  prKey: string | null;
+  repoKey: string;
+  need: import("@nonlinear/core").Capability;
+  title: string;
+  preview: string;
+  url?: string;
+  payload: Record<string, unknown>;
+  createdAt: number;
+}
+
 export interface Settings {
   theme: "system" | "light" | "dark";
+  /** accent/palette preset id (see lib/theme.ts) */
+  colorTheme: string;
+  customAccentLight: string;
+  customAccentDark: string;
+  /** optional background image (data: URL) shown behind the app under a darkness mask */
+  backgroundImage: string | null;
+  /** 0..1 darkness of the mask over the background image */
+  backgroundDim: number;
+  /** while on, GitHub writes are staged locally and reviewed before sending */
+  safeMode: boolean;
+  /** request yourself as a reviewer on GitHub when you start reviewing a PR here */
+  signalReviewStart: boolean;
   publicOnly: boolean;
   /** GitHub REST base (GitHub Enterprise or a local mock for tests) */
   apiBase: string;
   me: string | null;
+  githubAvatar: { login: string; apiBase: string; url: string | null; checkedAt: number } | null;
   myTeams: string[];
   authMode: "anonymous" | "oauth" | "pat";
   tokenCanWrite: boolean;
@@ -174,6 +203,11 @@ export const DEFAULT_KEYS: Record<string, string> = {
   chainPrev: "[",
   chainNext: "]",
   palette: "mod+k",
+  find: "mod+f",
+  sidebar: "mod+b",
+  diffSidebar: "mod+shift+b",
+  entry: "/",
+  newCard: "n",
   settings: "mod+,",
   shortcuts: "mod+/",
   historyBack: "mod+[",
@@ -182,9 +216,17 @@ export const DEFAULT_KEYS: Record<string, string> = {
 
 export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
+  colorTheme: "violet",
+  customAccentLight: "#5b4bd6",
+  customAccentDark: "#a497ff",
+  backgroundImage: null,
+  backgroundDim: 0.7,
+  safeMode: false,
+  signalReviewStart: true,
   publicOnly: true,
   apiBase: "https://api.github.com",
   me: null,
+  githubAvatar: null,
   myTeams: [],
   authMode: "anonymous",
   tokenCanWrite: false,
@@ -226,6 +268,9 @@ export const COLLECTIONS = {
   syncConflicts: { synced: false, kind: "pref" },
   drafts: { synced: false, kind: "pref" },
   intentions: { synced: false, kind: "pref" },
+  staged: { synced: false, kind: "pref" },
+  /** PR keys where review start was already signalled on GitHub */
+  reviewSignals: { synced: false, kind: "pref" },
   prs: { synced: false, kind: "pref" },
   repos: { synced: false, kind: "pref" },
   summaries: { synced: false, kind: "pref" },
@@ -254,6 +299,8 @@ export interface Collections {
   syncConflicts: Record<string, SyncConflict>;
   drafts: Record<string, DraftComment>;
   intentions: Record<string, Intention>;
+  staged: Record<string, StagedWrite>;
+  reviewSignals: Record<string, { at: number }>;
   prs: Record<string, PRSnapshot>;
   repos: Record<string, RepoInfo>;
   summaries: Record<string, SummaryRecord>;
@@ -280,7 +327,7 @@ export interface AppState extends Collections {
 
 const empty = (): Collections => ({
   views: {}, timelines: {}, releases: {}, pins: {}, cards: {}, placements: {}, notes: {}, reviews: {}, localEdges: {}, chains: {},
-  prLocal: {}, prEvents: {}, syncBase: {}, syncConflicts: {}, drafts: {}, intentions: {}, prs: {}, repos: {}, summaries: {}, ledger: {}, diffs: {}, settings: {},
+  prLocal: {}, prEvents: {}, syncBase: {}, syncConflicts: {}, drafts: {}, intentions: {}, staged: {}, reviewSignals: {}, prs: {}, repos: {}, summaries: {}, ledger: {}, diffs: {}, settings: {},
 });
 
 function recordOp(c: CollectionName, id: string, action: Op["action"], payload: unknown, deviceId: string) {
@@ -317,7 +364,11 @@ export const useApp = create<AppState>((set, get) => ({
       if (coll) coll[r.id] = r.value;
     }
     if (!c.settings.main) c.settings.main = DEFAULT_SETTINGS;
-    else c.settings.main = { ...DEFAULT_SETTINGS, ...c.settings.main, keybindings: { ...DEFAULT_KEYS, ...c.settings.main.keybindings } };
+    else {
+      const keybindings = { ...DEFAULT_KEYS, ...c.settings.main.keybindings };
+      if (keybindings.diffSidebar === "mod+b") keybindings.diffSidebar = DEFAULT_KEYS.diffSidebar!;
+      c.settings.main = { ...DEFAULT_SETTINGS, ...c.settings.main, keybindings };
+    }
     set({ ...c, loaded: true });
   },
 

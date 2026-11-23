@@ -255,3 +255,54 @@ mod tests {
         assert!(refs(&repo).unwrap().iter().any(|r| r.kind == "branch"));
     }
 }
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct GrepHit {
+    pub path: String,
+    pub line: usize, // 1-based
+    pub column: usize, // 1-based
+    pub text: String,
+}
+
+/// Whole-word, fixed-string search of the checked-out revision (`HEAD`) for an identifier.
+/// Binary files are skipped; at most `max` hits are returned.
+pub fn grep_word(repo: &Path, word: &str, max: usize) -> Result<Vec<GrepHit>, GitError> {
+    if word.is_empty() || word.len() > 200 || !word.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$') {
+        return Err(GitError("expected an identifier".into()));
+    }
+    let out = match run_git(repo, &["grep", "-n", "--column", "-I", "-w", "-F", "--full-name", "-e", word, "HEAD", "--"], Duration::from_secs(30)) {
+        Ok(out) => out,
+        // git grep exits 1 with no output when nothing matches
+        Err(GitError(msg)) if msg.trim_end() == "git grep:" => String::new(),
+        Err(e) => return Err(e),
+    };
+    Ok(parse_grep(&out, max))
+}
+
+fn parse_grep(out: &str, max: usize) -> Vec<GrepHit> {
+    let mut hits = Vec::new();
+    for raw in out.lines() {
+        // HEAD:path:line:column:text
+        let rest = raw.strip_prefix("HEAD:").unwrap_or(raw);
+        let mut parts = rest.splitn(4, ':');
+        let (Some(path), Some(line), Some(column), Some(text)) = (parts.next(), parts.next(), parts.next(), parts.next()) else { continue };
+        let (Ok(line), Ok(column)) = (line.parse(), column.parse()) else { continue };
+        hits.push(GrepHit { path: path.to_string(), line, column, text: text.chars().take(400).collect() });
+        if hits.len() >= max {
+            break;
+        }
+    }
+    hits
+}
+
+#[cfg(test)]
+mod grep_tests {
+    use super::*;
+    #[test]
+    fn parses_grep_output() {
+        let hits = parse_grep("HEAD:src/a.rs:3:8:fn parse() {}\nHEAD:b.c:10:1:parse(x);\n", 10);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0], GrepHit { path: "src/a.rs".into(), line: 3, column: 8, text: "fn parse() {}".into() });
+        assert_eq!(parse_grep("HEAD:a:1:1:x\nHEAD:b:1:1:y\n", 1).len(), 1);
+    }
+}

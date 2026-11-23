@@ -106,7 +106,7 @@ async function finishSession(code: string, verifier?: string): Promise<CloudStat
   // GitHub calls go through the backend proxy with the session; the token never reaches the app.
   await setSecret("github-token", session);
   const st = useApp.getState();
-  st.setSettings({ authMode: "oauth", apiBase: `${cloudUrl()}/gh`, me: login, tokenCanWrite: scopes.split(",").includes("public_repo") });
+  st.setSettings({ authMode: "oauth", apiBase: `${cloudUrl()}/gh`, me: login, githubAvatar: null, tokenCanWrite: scopes.split(",").includes("public_repo") });
   resetClient();
   return ensureKey(login);
 }
@@ -216,7 +216,7 @@ export async function disconnect(): Promise<void> {
     /* offline: still clear locally */
   }
   for (const k of ["sync-session", "github-token", "sync-key", "sync-cursor"]) await setSecret(k, null);
-  useApp.getState().setSettings({ syncEnabled: false, authMode: "anonymous", apiBase: "https://api.github.com", me: null, tokenCanWrite: false });
+  useApp.getState().setSettings({ syncEnabled: false, authMode: "anonymous", apiBase: "https://api.github.com", me: null, githubAvatar: null, tokenCanWrite: false });
   resetClient();
 }
 

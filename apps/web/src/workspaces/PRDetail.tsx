@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { parsePRKey, newId, type FeatureCard } from "@nonlinear/core";
+import { parsePRKey, newId, type FeatureCard, type RawIssueComment, type RawReviewComment } from "@nonlinear/core";
 import { useApp } from "../lib/store";
-import { cachedCapabilities, ensurePR, enrichPR, updatePRFields, describeError, WriteBlocked } from "../lib/github";
+import { cachedCapabilities, ensurePR, enrichPR, githubApi, updatePRFields, describeError, deferredNotice, WriteBlocked } from "../lib/github";
 import { renderMarkdown } from "../lib/markdown";
 import { ChainPanel } from "../components/ChainPanel";
 import { CIChip, ReviewChip, PRStateChip, timeAgo, Modal } from "../components/ui";
@@ -10,6 +10,8 @@ import { CIChip, ReviewChip, PRStateChip, timeAgo, Modal } from "../components/u
 /** In-app PR details with GitHub-equivalent metadata and permitted edits (§2.1). */
 export function PRDetail({ prKey }: { prKey: string }) {
   const pr = useApp((s) => s.prs[prKey]);
+  const linkedCards = useApp((s) => s.cards);
+  const linked = Object.values(linkedCards).filter((card) => !card.deleted && card.prs.includes(prKey));
   const toast = useApp((s) => s.toast);
   const online = useApp((s) => s.online);
   const [editing, setEditing] = useState<null | "body" | "labels" | "reviewers">(null);
@@ -68,7 +70,7 @@ export function PRDetail({ prKey }: { prKey: string }) {
           Open on GitHub ↗
         </a>
         <button className="btn" onClick={() => setLinkCard(true)}>
-          ▦ Link to card
+          {linked.length ? `▦ Linked to ${linked.length === 1 ? linked[0]!.title : linked.length + " cards"}` : "▦ Link to card"}
         </button>
         <span className="spacer" />
         <span className="small faint" title="Your capabilities on this repository">
@@ -116,7 +118,8 @@ export function PRDetail({ prKey }: { prKey: string }) {
             try {
               const patch = editing === "body" ? { body: v } : editing === "labels" ? { labels: split(v) } : { reviewers: split(v) };
               const res = await updatePRFields(prKey, patch);
-              if (res && "queued" in res) toast("warn", "Offline: change queued. You'll confirm it before it is sent.");
+              const notice = deferredNotice(res);
+              if (notice) toast("warn", notice);
               else toast("success", "Updated on GitHub");
               setEditing(null);
             } catch (e) {
@@ -125,9 +128,48 @@ export function PRDetail({ prKey }: { prKey: string }) {
           }}
         />
       )}
+      <PRComments key={prKey} owner={pr.owner} repo={pr.repo} number={pr.number} />
       {linkCard && <LinkCardModal prKey={prKey} onClose={() => setLinkCard(false)} />}
     </div>
   );
+}
+
+type DetailComment = RawIssueComment | RawReviewComment;
+const commentCache = new Map<string, { time: number; request: Promise<DetailComment[]> }>();
+
+function PRComments({ owner, repo, number }: { owner: string; repo: string; number: number }) {
+  const online = useApp((s) => s.online);
+  const apiBase = useApp((s) => s.settings_().apiBase);
+  const [comments, setComments] = useState<DetailComment[]>();
+  const [error, setError] = useState(false);
+  useEffect(() => {
+    let active = true;
+    const key = `${apiBase}:${owner}/${repo}#${number}`;
+    let cache = commentCache.get(key);
+    if (online && (!cache || Date.now() - cache.time > 5 * 60_000)) {
+      const request = githubApi().then((api) => Promise.all([
+        api.listIssueComments(owner, repo, number),
+        api.listReviewComments(owner, repo, number),
+      ])).then((items) => items.flat().sort((a, b) => a.created_at.localeCompare(b.created_at)));
+      cache = { time: Date.now(), request };
+      commentCache.set(key, cache);
+      void request.catch(() => { if (commentCache.get(key)?.request === request) commentCache.delete(key); });
+    }
+    void cache?.request.then((items) => { if (active) { setComments(items); setError(false); } }, () => { if (active) setError(true); });
+    return () => { active = false; };
+  }, [apiBase, owner, repo, number, online]);
+  return <section className="col" aria-label="GitHub comments">
+    <h3 className="h3">Comments {comments?.length ? `(${comments.length})` : ""}</h3>
+    {comments?.map((comment) => <article className="panel pad" key={comment.html_url}>
+      <div className="row small">
+        <b>{comment.user?.login ?? "Deleted user"}</b>
+        {"path" in comment && <span className="mono ellipsis">{comment.path}{comment.line ? `:${comment.line}` : ""}</span>}
+        <a className="faint" href={comment.html_url} target="_blank" rel="noreferrer">{timeAgo(comment.created_at)}</a>
+      </div>
+      <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(comment.body) }} />
+    </article>)}
+    {!comments?.length && <div className="faint small">{comments ? "No GitHub comments." : !online ? "Comments are unavailable offline." : error ? "Could not load GitHub comments." : "Loading comments…"}</div>}
+  </section>;
 }
 
 function split(v: string): string[] {

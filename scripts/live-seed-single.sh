@@ -14,11 +14,11 @@ git -c protocol.file.allow=always submodule add -q https://github.com/octocat/He
 git add . && git commit -qm "Seed: README + generators/hello submodule"
 git push -q -u "$URL" main
 git checkout -q -b upstream-fix
-printf 'object IssueUnit {\n  def wakeup(x: Int): Int = x + 1\n}\n' > IssueUnit.scala
-git add . && git commit -qm "Fix i34 wakeup" && git push -q -u "$URL" upstream-fix
+printf 'object IssueUnit {\n  def retry(x: Int): Int = x + 1\n}\n' > IssueUnit.scala
+git add . && git commit -qm "Fix retry handling for iteration 95" && git push -q -u "$URL" upstream-fix
 git checkout -q main && git checkout -q -b bump-boom
-printf 'class BoomConfig {\n  val tiles = 1\n  val wakeupFilter = true\n}\n' > BoomConfigs.scala
-git add . && git commit -qm "Bump BOOM for i34" && git push -q -u "$URL" bump-boom
+printf 'class BoomConfig {\n  val tiles = 1\n  val skipStale = true\n}\n' > BoomConfigs.scala
+git add . && git commit -qm "Bump BOOM for iteration 95" && git push -q -u "$URL" bump-boom
 git checkout -q main && git checkout -q -b docs
 printf '# docs\n' > DOCS.md && git add . && git commit -qm "Docs" && git push -q -u "$URL" docs
 cd / && rm -rf "$W"

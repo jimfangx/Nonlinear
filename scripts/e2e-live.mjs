@@ -29,7 +29,7 @@ await page.getByText(new RegExp(`@${OWNER}`, "i")).first().waitFor({ timeout: 20
 await page.evaluate(([p, c]) => window.__nl.getState().put("views", "live", { id: "live", name: "Live e2e", repos: c && c !== "octocat/hello-world" ? [...new Set([p, c])] : [p], category: "all-open", groupBy: "none", sort: "updated", releaseLens: null, createdAt: Date.now() }), [P, C]);
 await page.goto(`${APP}/#/inbox/live`);
 await page.getByRole("button", { name: /Refresh/ }).click();
-await page.getByText("Bump BOOM for i34 fix").first().waitFor({ timeout: 30000 });
+await page.getByText("Bump BOOM for iteration 95").first().waitFor({ timeout: 30000 });
 await page.getByRole("tab", { name: /All open/ }).click();
 await page.locator(".list-row", { hasText: `${P}#${BUMP}` }).click();
 await page.getByText(/[23] PRs · linear stack/).waitFor({ timeout: 20000 });

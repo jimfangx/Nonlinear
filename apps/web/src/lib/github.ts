@@ -23,7 +23,8 @@ import {
   diffSnapshots,
 } from "@nonlinear/core";
 import { getSecret } from "./db";
-import { useApp } from "./store";
+import { useApp, type StagedWrite } from "./store";
+import { safeModeOn, stage, takeRunner, discardStaged } from "./safemode";
 
 let client: GitHubClient | null = null;
 let clientToken: string | null | undefined;
@@ -55,6 +56,39 @@ export async function githubApi(): Promise<GitHubClient> {
     });
   }
   return client;
+}
+
+export function githubAvatarUrl(value: unknown): string | null {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && !url.username && !url.password && url.hostname.endsWith(".githubusercontent.com")) return url.href;
+  } catch { /* Use the account icon for invalid image URLs. */ }
+  return null;
+}
+
+const avatarRequests = new Map<string, Promise<void>>();
+
+export function refreshGitHubAvatar(): Promise<void> | undefined {
+  const app = useApp.getState();
+  const { me, apiBase, authMode, githubAvatar } = app.settings_();
+  if (!app.online || !me || authMode === "anonymous") return;
+  if (githubAvatar?.login === me && githubAvatar.apiBase === apiBase && Date.now() - githubAvatar.checkedAt < 86_400_000) return;
+  const key = JSON.stringify([me, apiBase, authMode]);
+  let pending = avatarRequests.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const api = await githubApi();
+      if (!api.authenticated) return;
+      const profile = await api.viewer();
+      const state = useApp.getState();
+      const current = state.settings_();
+      if (current.me !== me || current.apiBase !== apiBase || current.authMode !== authMode || profile.login.toLowerCase() !== me.toLowerCase()) return;
+      state.setSettings({ githubAvatar: { login: me, apiBase, url: githubAvatarUrl(profile.avatar_url), checkedAt: Date.now() } });
+    })().catch(() => undefined).finally(() => avatarRequests.delete(key));
+    avatarRequests.set(key, pending);
+  }
+  return pending;
 }
 
 export function resetClient(): void {
@@ -267,18 +301,19 @@ function queueIntention(kind: Intention["kind"], prKey: string, payload: Record<
   return i;
 }
 
-export async function guardedWrite<T>(
-  prKey: string,
-  need: Capability,
-  kind: Intention["kind"],
-  payload: Record<string, unknown>,
-  doWrite: () => Promise<T>,
-  fallback?: { text?: string; url?: string },
-): Promise<T | { queued: Intention }> {
+export type Deferred = { queued: Intention } | { staged: StagedWrite };
+
+/** If a write was deferred (offline queue or safe mode), a message for the user; else null. */
+export function deferredNotice(res: unknown, what = "Change"): string | null {
+  if (!res || typeof res !== "object") return null;
+  if ("staged" in res) return `Safe mode: ${what.toLowerCase()} staged. You'll review it before anything is sent to GitHub.`;
+  if ("queued" in res) return `Offline: ${what.toLowerCase()} queued. You'll confirm it before it is sent.`;
+  return null;
+}
+
+/** Online + signed-in + fresh permission check, then perform the write. */
+async function checkedWrite<T>(repoKey: string, need: Capability, doWrite: () => Promise<T>, fallback?: { text?: string; url?: string }): Promise<T> {
   const st = useApp.getState();
-  const r = parsePRKey(prKey)!;
-  const repoKey = `${r.owner}/${r.repo}`.toLowerCase();
-  if (!st.online) return { queued: queueIntention(kind, prKey, payload) };
   if (st.settings_().authMode === "anonymous") throw new WriteBlocked("Sign in to write to GitHub. Nonlinear never uses an over-scoped credential silently.", fallback);
   const { caps } = await freshCapabilities(repoKey);
   if (!caps.has(need)) throw new WriteBlocked(`You don't have “${need}” on ${repoKey}.`, fallback);
@@ -286,8 +321,107 @@ export async function guardedWrite<T>(
     return await doWrite();
   } catch (e) {
     if (e instanceof GitHubError && (e.kind === "org-restricted" || e.kind === "forbidden")) throw new WriteBlocked(describeError(e), fallback);
+    throw e;
+  }
+}
+
+export async function guardedWrite<T>(
+  prKey: string,
+  need: Capability,
+  kind: Intention["kind"],
+  payload: Record<string, unknown>,
+  doWrite: () => Promise<T>,
+  fallback?: { text?: string; url?: string },
+): Promise<T | Deferred> {
+  const st = useApp.getState();
+  const r = parsePRKey(prKey)!;
+  const repoKey = `${r.owner}/${r.repo}`.toLowerCase();
+  if (safeModeOn()) return { staged: stage({ kind, prKey, repoKey, need, payload, run: doWrite }) };
+  if (!st.online) return { queued: queueIntention(kind, prKey, payload) };
+  try {
+    return await checkedWrite(repoKey, need, doWrite, fallback);
+  } catch (e) {
     if (e instanceof GitHubError && e.kind === "network") return { queued: queueIntention(kind, prKey, payload) };
     throw e;
+  }
+}
+
+/** Repository-level write (no PR), e.g. a release branch + draft PR. Staged in safe mode. */
+export async function guardedRepoWrite<T>(repoKey: string, need: Capability, kind: Intention["kind"], payload: Record<string, unknown>, doWrite: () => Promise<T>): Promise<T | { staged: StagedWrite }> {
+  if (safeModeOn()) return { staged: stage({ kind, prKey: null, repoKey, need, payload, run: doWrite }) };
+  return checkedWrite(repoKey, need, doWrite);
+}
+
+/** Send one change that safe mode staged. Permissions are re-checked now. */
+export async function sendStaged(item: StagedWrite): Promise<void> {
+  if (!useApp.getState().online) throw new Error("You're offline. Reconnect to send staged changes.");
+  const run = takeRunner(item.id) ?? replayFromPayload(item);
+  const result = await checkedWrite(item.repoKey, item.need, run);
+  if (result && typeof result === "object" && "kind" in result && (result as { kind: string }).kind === "conflict") {
+    throw new Error((result as { reason?: string }).reason ?? "The PR changed on GitHub; re-apply the change.");
+  }
+  discardStaged(item.id);
+  if (item.prKey) void enrichPR(item.prKey).catch(() => undefined);
+}
+
+function replayFromPayload(item: StagedWrite): () => Promise<unknown> {
+  const p = item.payload as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const r = item.prKey ? parsePRKey(item.prKey) : null;
+  return async () => {
+    const c = await githubApi();
+    if (!r) throw new Error("This change can't be replayed after a reload. Discard it and redo the action.");
+    switch (item.kind) {
+      case "comment": return c.createIssueComment(r.owner, r.repo, r.number, p.body);
+      case "review": return c.submitReview(r.owner, r.repo, r.number, p.request);
+      case "lgtm": return c.submitReview(r.owner, r.repo, r.number, { commit_id: p.commit_id, event: "APPROVE", body: p.body || "LGTM" });
+      case "review-start": return c.requestReviewers(r.owner, r.repo, r.number, [p.login]);
+      case "chain-block": {
+        const current = await c.getPull(r.owner, r.repo, r.number);
+        const outcome = rebaseManagedUpdate(p.baseBody, current.body ?? "", p.content);
+        if (outcome.kind === "conflict") return outcome;
+        return c.updatePull(r.owner, r.repo, r.number, { body: outcome.body });
+      }
+      case "update-body": case "labels": case "milestone": case "reviewers": {
+        if (p.body !== undefined || p.title !== undefined) await c.updatePull(r.owner, r.repo, r.number, { title: p.title, body: p.body });
+        if (p.labels) await c.setLabels(r.owner, r.repo, r.number, p.labels);
+        if (p.milestone !== undefined) await c.setMilestone(r.owner, r.repo, r.number, p.milestone);
+        if (p.reviewers?.length) await c.requestReviewers(r.owner, r.repo, r.number, p.reviewers);
+        return;
+      }
+      default: throw new Error("This change can't be replayed after a reload. Discard it and redo the action.");
+    }
+  };
+}
+
+/** Approve on GitHub with an "LGTM" review. */
+export function submitLGTM(pr: PRSnapshot, body = "LGTM") {
+  const r = parsePRKey(pr.key)!;
+  const payload = { commit_id: pr.headSha, body };
+  return guardedWrite(pr.key, "can-review", "lgtm", payload, async () => (await githubApi()).submitReview(r.owner, r.repo, r.number, { commit_id: pr.headSha, event: "APPROVE", body }));
+}
+
+/**
+ * Make "I've started reviewing" visible on GitHub by requesting a review from
+ * yourself (GitHub then shows "Awaiting review from @you"). GitHub's pending
+ * reviews are only visible to their author, so this is the only public signal
+ * the API offers. Sent at most once per PR; never for your own PRs.
+ */
+export async function signalReviewStart(pr: PRSnapshot, opts: { force?: boolean } = {}): Promise<void> {
+  const st = useApp.getState();
+  const s = st.settings_();
+  if ((!s.signalReviewStart && !opts.force) || !s.me || st.reviewSignals[pr.key] || pr.state !== "open") return;
+  if (pr.author.toLowerCase() === s.me.toLowerCase()) return;
+  const me = s.me.toLowerCase();
+  if (pr.reviews?.some((rv) => rv.user.toLowerCase() === me) || pr.requestedReviewers?.some((u) => u.toLowerCase() === me)) { st.put("reviewSignals", pr.key, { at: Date.now() }); return; }
+  st.put("reviewSignals", pr.key, { at: Date.now() });
+  const r = parsePRKey(pr.key)!;
+  try {
+    const res = await guardedWrite(pr.key, "can-review", "review-start", { login: s.me }, async () => (await githubApi()).requestReviewers(r.owner, r.repo, r.number, [s.me!]));
+    if (res && typeof res === "object" && "staged" in res) st.toast("info", "Safe mode: “started reviewing” signal staged for GitHub.");
+    else if (!(res && typeof res === "object" && "queued" in res)) st.toast("info", `Marked on GitHub that @${s.me} is reviewing ${pr.key}.`);
+  } catch (e) {
+    st.remove("reviewSignals", pr.key);
+    st.toast("warn", `Couldn't mark the review start on GitHub: ${describeError(e)}`);
   }
 }
 

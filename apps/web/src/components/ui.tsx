@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { PRSnapshot, EdgeSyncStatus } from "@nonlinear/core";
 import { useApp } from "../lib/store";
 
@@ -10,6 +10,7 @@ export function Split({
   initial = 0.35,
   min = 0.12,
   showSecond = true,
+  showFirst = true,
   className = "",
   children,
 }: {
@@ -18,12 +19,19 @@ export function Split({
   initial?: number;
   min?: number;
   showSecond?: boolean;
+  showFirst?: boolean;
   className?: string;
   children: [ReactNode, ReactNode];
 }) {
   const saved = useApp((s) => (s.settings.main?.layout?.[`split:${id}`] as number | undefined) ?? initial);
   const [ratio, setRatio] = useState(saved);
   const ref = useRef<HTMLDivElement>(null);
+  const secondPresent = useAnimatedPresence(showSecond);
+  const lastSecond = useRef<ReactNode>(null);
+  useLayoutEffect(() => {
+    if (showSecond) lastSecond.current = children[1];
+  }, [showSecond, children[1]]);
+  const closingSecond = secondPresent && !showSecond;
   const persist = useCallback(
     (r: number) => {
       const st = useApp.getState();
@@ -62,12 +70,13 @@ export function Split({
   };
   return (
     <div ref={ref} className={`split ${vertical ? "vertical" : ""} ${className}`}>
-      <div className="pane" style={{ flexBasis: showSecond ? `${ratio * 100}%` : "100%", flexGrow: 0, flexShrink: 0 }}>
+      <div className="pane" hidden={!showFirst} style={{ flexBasis: secondPresent ? `${ratio * 100}%` : "100%", flexGrow: 0, flexShrink: 0 }}>
         {children[0]}
       </div>
       <div
         className="splitter"
-        hidden={!showSecond}
+        hidden={!showFirst || !secondPresent}
+        inert={closingSecond}
         role="separator"
         aria-orientation={vertical ? "horizontal" : "vertical"}
         aria-valuenow={Math.round(ratio * 100)}
@@ -75,8 +84,9 @@ export function Split({
         onPointerDown={onDown}
         onKeyDown={onKey}
       />
-      <div className="pane" style={{ flex: 1 }} hidden={!showSecond}>
-        {children[1]}
+      <div className="pane split-secondary" style={{ flex: 1 }} hidden={!secondPresent}
+        inert={closingSecond} data-closing={closingSecond || undefined}>
+        {closingSecond ? lastSecond.current : children[1]}
       </div>
     </div>
   );
@@ -84,7 +94,7 @@ export function Split({
 
 /* ---------------- Modal ---------------- */
 
-export function useOverlayPresence(open: boolean): boolean {
+export function useAnimatedPresence(open: boolean): boolean {
   const [exiting, setExiting] = useState(open);
   useEffect(() => {
     if (open) {
@@ -95,7 +105,7 @@ export function useOverlayPresence(open: boolean): boolean {
     const timer = window.setTimeout(() => setExiting(false), window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? 0 : 150);
     return () => window.clearTimeout(timer);
   }, [open, exiting]);
-  return open || exiting;
+  return open || (exiting && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches);
 }
 
 export function Modal({ title, onClose, children, footer, wide, open: openProp }: { open?: boolean; title: ReactNode; onClose: () => void; children: ReactNode; footer?: ReactNode; wide?: boolean }) {
@@ -105,7 +115,7 @@ export function Modal({ title, onClose, children, footer, wide, open: openProp }
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const overlay = useRef<HTMLDivElement>(null);
-  const present = useOverlayPresence(open);
+  const present = useAnimatedPresence(open);
   const dismiss = () => {
     if (!open || closing) return;
     if (openProp !== undefined || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) onClose();
@@ -275,4 +285,21 @@ export function download(name: string, text: string, type = "text/plain") {
   a.download = name;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+/* ---------------- Diff stats (+ / − with a proportional block bar) ---------------- */
+
+export function DiffStat({ additions, deletions, blocks = 5, compact = false }: { additions: number; deletions: number; blocks?: number; compact?: boolean }) {
+  const total = additions + deletions;
+  const add = total ? Math.round((additions / total) * blocks) : 0;
+  const del = total ? Math.min(blocks - add, Math.round((deletions / total) * blocks)) : 0;
+  return (
+    <span className={`diffstat ${compact ? "compact" : ""}`} title={`${additions.toLocaleString()} additions, ${deletions.toLocaleString()} deletions`}>
+      <span className="diffstat-add">+{additions.toLocaleString()}</span>
+      <span className="diffstat-del">−{deletions.toLocaleString()}</span>
+      <span className="diffstat-bar" aria-hidden="true">
+        {Array.from({ length: blocks }, (_, i) => <i key={i} className={i < add ? "a" : i < add + del ? "d" : ""} />)}
+      </span>
+    </span>
+  );
 }

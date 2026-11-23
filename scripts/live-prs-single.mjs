@@ -14,8 +14,8 @@ const api = async (path, body) => {
 };
 const existing = await api(`/repos/${R}/pulls?state=open&per_page=50`);
 const open = async (head, title, body) => existing.find((p) => p.head.ref === head) ?? api(`/repos/${R}/pulls`, { head, base: "main", title, body });
-const up = await open("upstream-fix", "Fix i34 issue-queue wakeup", "Upstream fix.");
-const bump = await open("bump-boom", "Bump BOOM for i34 fix", `Integrates the fix.\n\nDepends-On: ${R}#${up.number}`);
+const up = await open("upstream-fix", "Fix retry handling for iteration 95", "Upstream fix.");
+const bump = await open("bump-boom", "Bump BOOM for iteration 95", `Integrates the fix.\n\nDepends-On: ${R}#${up.number}`);
 const docs = await open("docs", "Docs follow-up", "Follow-up.");
 const tip = (await api("/repos/octocat/Hello-World/commits/master")).sha;
 writeFileSync("scripts/.live.env", `OWNER=${OWNER}\nPARENT=${NAME}\nCHILD=${NAME}\nFIX_SHA=${tip}\nMODE=single\nSUBPATH=generators/hello\nCHILDREPO=octocat/hello-world\nUP=${up.number}\nBUMP=${bump.number}\nFOLLOW=${docs.number}\n`);

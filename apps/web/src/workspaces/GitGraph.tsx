@@ -1,13 +1,15 @@
+import { CachedEntry } from "../components/CachedEntry";
+import { RepositoryShortcuts, useCachedRepositories } from "../components/RepositoryShortcuts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { layoutLanes, indexPatch, type CommitNode } from "@nonlinear/core";
+import { layoutLanes, type CommitNode } from "@nonlinear/core";
 import { useApp } from "../lib/store";
 import { githubApi, describeError } from "../lib/github";
 import { gitlinksAt, remoteGitRefs, remoteGitLog, usesGitTransport } from "../lib/timeline";
 import { isDesktop, invoke } from "../lib/platform";
 import { availableSources, gitDiff, gitGitlinks, gitLog, gitRefs, sourceLabel, type Source } from "../lib/sources";
-import { FileDiff } from "../components/FileDiff";
+import { CommitDiff } from "../components/CommitDiff";
 import { Modal, timeAgo, Split } from "../components/ui";
 
 const LANE_W = 14;
@@ -20,6 +22,8 @@ interface Ref {
   kind: "branch" | "tag";
 }
 
+const refKey = (ref: Ref) => `${ref.kind}:${ref.name}`;
+
 /**
  * GitKraken-style graph (§7): one independent graph per repository from the
  * GitHub API (web) or a local working tree / mirror (desktop). Loads history
@@ -27,59 +31,24 @@ interface Ref {
  */
 export function GitGraph() {
   const { owner, repo } = useParams();
-  const views = useApp((s) => s.views);
   const nav = useNavigate();
-  const layout = useApp((state) => state.settings_().layout);
-  const pinned = (layout.graphPinned as string[] | undefined) ?? [];
-  const recent = (layout.graphRecent as string[] | undefined) ?? [];
-  const visits = (layout.graphVisits as Record<string, number> | undefined) ?? {};
-  const openRepo = (repo: string) => { showSuggestions(false); nav(`/graph/${repo}`); };
-  const repos = useMemo(() => [...new Set(Object.values(views).flatMap((v) => v.repos))].sort(), [views]);
-  const [suggestions, showSuggestions] = useState(false);
-  const [input, setInput] = useState(owner && repo ? `${owner}/${repo}` : repos[0] ?? "");
+  const repositories = useCachedRepositories();
   const key = owner && repo ? `${owner}/${repo}`.toLowerCase() : null;
-  useEffect(() => {
-    if (!key) return;
-    setInput(key);
-    const state = useApp.getState();
-    const saved = state.settings_().layout;
-    const history = (saved.graphRecent as string[] | undefined) ?? [];
-    const counts = (saved.graphVisits as Record<string, number> | undefined) ?? {};
-    if (history[0] !== key || !counts[key]) {
-      state.setSettings({ layout: { ...saved, graphRecent: [key, ...history.filter((repo) => repo !== key)].slice(0, 12),
-        graphVisits: { ...counts, [key]: (counts[key] ?? 0) + 1 } } });
-    }
-  }, [key]);
-  const ranked = [...new Set([...recent, ...repos])].sort((a, b) => (visits[b] ?? 0) - (visits[a] ?? 0));
-  const shortcuts = [...new Set([...pinned, ...ranked])].slice(0, Math.max(5, pinned.length));
-  const togglePin = (repo: string) => {
-    const state = useApp.getState();
-    state.setSettings({ layout: { ...state.settings_().layout, graphPinned: pinned.includes(repo) ? pinned.filter((value) => value !== repo) : [...pinned, repo] } });
+  const [input, setInput] = useState(key ?? "");
+  const openRepo = (value: string) => {
+    const repository = value.trim().toLowerCase();
+    if (/^[^/\s]+\/[^/\s]+$/.test(repository)) nav(`/graph/${repository}`);
   };
+  useEffect(() => { if (key) setInput(key); }, [key]);
+
   return (
     <div className="col" style={{ height: "100%", gap: 0 }}>
-      <form className="toolbar graph-picker" onSubmit={(e) => { e.preventDefault(); if (/^[^/\s]+\/[^/\s]+$/.test(input.trim())) openRepo(input.trim()) }}>
+      <form className="toolbar graph-picker" onSubmit={(e) => { e.preventDefault(); openRepo(input); }}>
         <h1 className="toolbar-title">Git Graph</h1>
-        <div className="graph-repo-input" onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) showSuggestions(false); }}>
-          <input className="input" value={input} onFocus={() => showSuggestions(true)}
-            onChange={(e) => { setInput(e.target.value); showSuggestions(true); }}
-            onKeyDown={(e) => { if (e.key === "Escape") showSuggestions(false); }}
-            placeholder="owner/repo" aria-label="Repository" autoComplete="off" />
-          {suggestions && repos.some((repo) => repo !== input && repo.includes(input.toLowerCase())) && (
-            <div className="panel graph-repo-menu" role="group" aria-label="Matching repositories">
-              {repos.filter((repo) => repo !== input && repo.includes(input.toLowerCase())).map((repo) => (
-                <button type="button" className="btn ghost" key={repo} onClick={() => { setInput(repo); showSuggestions(false); }}>{repo}</button>
-              ))}
-            </div>
-          )}
-        </div>
-        <button type="submit" className="btn">
-          Open
-        </button>
-        {shortcuts.map((repo) => <span className={`graph-shortcut ${repo === key ? "selected" : ""}`} key={repo}>
-          <button type="button" onClick={() => openRepo(repo)} title={repo}>{repo.split("/").at(-1)}</button>
-          <button type="button" onClick={() => togglePin(repo)} aria-pressed={pinned.includes(repo)} aria-label={`${pinned.includes(repo) ? "Unpin" : "Pin"} ${repo}`} title={`${pinned.includes(repo) ? "Unpin" : "Pin"} ${repo}`}>{pinned.includes(repo) ? "★" : "☆"}</button>
-        </span>)}
+        <CachedEntry value={input} onChange={setInput} onSelect={openRepo} options={repositories.map((value) => ({ value }))}
+          label="Repository" placeholder="owner/repo" />
+        <button type="submit" className="btn">Open</button>
+        <RepositoryShortcuts current={key} repositories={repositories} onOpen={openRepo} />
       </form>
       {key ? <Graph key={key} repoKey={key} /> : <div className="empty">Choose a repository.</div>}
     </div>
@@ -94,68 +63,98 @@ function Graph({ repoKey }: { repoKey: string }) {
   const local = src.kind === "local" ? src.path : null;
   const [commits, setCommits] = useState<CommitNode[]>([]);
   const [refs, setRefs] = useState<Ref[]>([]);
-  const [selectedBranches, setSelectedBranches] = useState<string[]>([]);
+  const [selectedRefs, setSelectedRefs] = useState<Ref[]>([]);
   const [pages, setPages] = useState(1);
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [sel, setSel] = useState<string | null>(null);
+  const [hover, setHover] = useState<{ commit: CommitNode; x: number; y: number } | null>(null);
   const [q, setQ] = useState("");
   const prs = useApp((s) => s.prs);
   const pins = useApp((s) => s.pins);
   const releases = useApp((s) => s.releases);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       setBusy("Loading refs…");
       try {
+        let available: Ref[];
+        let primary: string | undefined;
         if (src.kind !== "github") {
           const rs = await gitRefs(src);
-          setRefs(rs.map((r) => ({ name: r.name, sha: r.sha, kind: r.kind === "tag" ? "tag" : "branch" })));
+          available = rs.map((r) => ({ name: r.name, sha: r.sha, kind: r.kind === "tag" ? "tag" : "branch" }));
+          primary = (rs.find((ref) => ref.kind === "branch" && /^(main|master)$/.test(ref.name))
+            ?? rs.find((ref) => ref.kind === "remote" && /\/(main|master)$/.test(ref.name))
+            ?? rs.find((ref) => ref.kind === "branch"))?.name;
         } else if (remoteGit) {
           const { branch, branches, tags } = await remoteGitRefs(repoKey);
-          setRefs([
+          available = [
             ...branches.map(([name, sha]) => ({ name, sha, kind: "branch" as const })),
             ...tags.map(([name, sha]) => ({ name, sha, kind: "tag" as const })),
-          ]);
-          setSelectedBranches(branch ? [branch] : []);
+          ];
+          primary = branch ?? undefined;
         } else {
           const c = await githubApi();
           const [info, br, tg] = await Promise.all([c.repo(owner, name), c.branches(owner, name), c.tags(owner, name)]);
-          setRefs([...br.map((b) => ({ name: b.name, sha: b.commit.sha, kind: "branch" as const })), ...tg.slice(0, 40).map((t) => ({ name: t.name, sha: t.commit.sha, kind: "tag" as const }))]);
-          setSelectedBranches([info.defaultBranch]);
+          available = [...br.map((b) => ({ name: b.name, sha: b.commit.sha, kind: "branch" as const })), ...tg.map((t) => ({ name: t.name, sha: t.commit.sha, kind: "tag" as const }))];
+          primary = info.defaultBranch;
         }
+        if (cancelled) return;
+        const initial = available.find((ref) => ref.kind === "branch" && ref.name === primary)
+          ?? (primary ? { kind: "branch" as const, name: primary, sha: "" } : null);
+        setRefs(available);
+        setSelectedRefs(initial ? [initial] : []);
       } catch (e) {
-        setErr(describeError(e));
+        if (!cancelled) setErr(describeError(e));
       } finally {
-        setBusy(null);
+        if (!cancelled) setBusy(null);
       }
     })();
+    return () => { cancelled = true; };
   }, [repoKey, JSON.stringify(src), remoteGit]);
 
   useEffect(() => {
-    if (!selectedBranches.length && src.kind === "github") return;
+    if (!selectedRefs.length && src.kind === "github") {
+      setCommits([]);
+      return;
+    }
+    let cancelled = false;
     (async () => {
       setBusy("Loading history…");
+      setErr(null);
       try {
         let all: CommitNode[] = [];
-        if (src.kind !== "github") all = await gitLog(src, "--all", pages * 200);
-        else if (remoteGit) {
-          for (const branch of selectedBranches) all.push(...await remoteGitLog(repoKey, `refs/heads/${branch}`, pages * 200));
+        if (src.kind !== "github") {
+          all = await gitLog(src, "--all", pages * 200);
+          for (const ref of selectedRefs) {
+            if (cancelled) return;
+            if (ref.sha && !all.some((commit) => commit.sha === ref.sha)) all.push(...await gitLog(src, ref.sha, pages * 200));
+          }
+        } else if (remoteGit) {
+          for (const ref of selectedRefs) {
+            if (cancelled) return;
+            all.push(...await remoteGitLog(repoKey, `refs/${ref.kind === "tag" ? "tags" : "heads"}/${ref.name}`, pages * 200));
+          }
         } else {
           const c = await githubApi();
-          for (const b of selectedBranches) all.push(...(await c.commits(owner, name, { sha: b, pages })));
+          for (const ref of selectedRefs) {
+            if (cancelled) return;
+            all.push(...await c.commits(owner, name, { sha: ref.sha || ref.name, pages }));
+          }
         }
         const m = new Map(all.map((x) => [x.sha, x]));
-        setCommits([...m.values()]);
+        if (!cancelled) setCommits([...m.values()]);
       } catch (e) {
-        setErr(describeError(e));
+        if (!cancelled) setErr(describeError(e));
       } finally {
-        setBusy(null);
+        if (!cancelled) setBusy(null);
       }
     })();
-  }, [selectedBranches.join(","), pages, JSON.stringify(src), remoteGit]);
+    return () => { cancelled = true; };
+  }, [selectedRefs, pages, src, remoteGit]);
 
-  const { rows, maxLane } = useMemo(() => layoutLanes(commits), [commits]);
+  const { rows, maxLane, dividers } = useMemo(() => layoutLanes(commits, selectedRefs.map((ref) => ref.sha || undefined)), [commits, selectedRefs]);
   const refsBySha = useMemo(() => {
     const m = new Map<string, Ref[]>();
     for (const r of refs) (m.get(r.sha) ?? m.set(r.sha, []).get(r.sha)!).push(r);
@@ -182,32 +181,58 @@ function Graph({ repoKey }: { repoKey: string }) {
     if (sha && index.has(sha)) {
       setSel(sha);
       virt.scrollToIndex(index.get(sha)!, { align: "center" });
-    } else useApp.getState().toast("info", "Not in loaded history. Load more or select its branch.");
+    } else useApp.getState().toast("info", "Not in loaded history. Load more or select its branch or tag.");
   };
   const width = (maxLane + 1) * LANE_W + 8;
+  const virtualRows = virt.getVirtualItems();
   const selCommit = sel ? commits.find((c) => c.sha === sel) : undefined;
+  useEffect(() => {
+    if (!selCommit) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || document.querySelector(".overlay:not([inert]), #workspace-content[inert]")) return;
+      event.preventDefault();
+      setSel(null);
+      setHover(null);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [selCommit]);
+
+  const unselected = refs.filter((ref) => !selectedRefs.some((selected) => refKey(selected) === refKey(ref)));
 
   return (
     <>
       <div className="toolbar small">
-        <span>Branches:</span>
-        <select className="input" multiple={false} value="" onChange={(e) => e.target.value && setSelectedBranches([...new Set([...selectedBranches, e.target.value])])} aria-label="Add branch">
-          <option value="">+ add branch</option>
-          {refs.filter((r) => r.kind === "branch" && !selectedBranches.includes(r.name)).map((r) => (
-            <option key={r.name}>{r.name}</option>
+        <select className="input" value="" onChange={(e) => {
+          const ref = unselected.find((item) => refKey(item) === e.target.value);
+          if (ref) setSelectedRefs([...selectedRefs, ref]);
+        }} aria-label="Add branch or tag">
+          <option value="">+ Add branch or tag</option>
+          {(["branch", "tag"] as const).map((kind) => (
+            <optgroup key={kind} label={kind === "branch" ? "Branches" : "Tags"}>
+              {unselected.filter((ref) => ref.kind === kind).map((ref) => (
+                <option key={refKey(ref)} value={refKey(ref)}>{ref.name}</option>
+              ))}
+            </optgroup>
           ))}
         </select>
-        {selectedBranches.map((b) => (
-          <span key={b} className="chip">
-            {b}
-            <button className="btn ghost sm" style={{ height: 16, padding: 0 }} onClick={() => setSelectedBranches(selectedBranches.filter((x) => x !== b))}>
+        {selectedRefs.map((ref) => (
+          <span key={refKey(ref)} className={`chip ${ref.kind === "tag" ? "ref tag" : ""}`}>
+            {ref.name}
+            <button className="btn ghost sm" style={{ height: 16, padding: 0 }} aria-label={`Remove ${ref.kind} ${ref.name}`} onClick={() => setSelectedRefs(selectedRefs.filter((item) => item !== ref))}>
               ✕
             </button>
           </span>
         ))}
-        <input className="input" placeholder="Jump to SHA / ref" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && jump(q)} />
+        <input className="input" data-workspace-search placeholder="Jump to SHA / ref" value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={(e) => e.key === "Enter" && jump(q)} />
         <span className="spacer" />
-        <select className="input" aria-label="Data source" value={JSON.stringify(src)} onChange={(e) => setSrc(JSON.parse(e.target.value) as Source)}>
+        <select className="input" aria-label="Data source" value={JSON.stringify(src)} onChange={(e) => {
+          setSrc(JSON.parse(e.target.value) as Source);
+          setRefs([]);
+          setSelectedRefs([]);
+          setSel(null);
+          setHover(null);
+        }}>
           {sources.map((x) => (
             <option key={JSON.stringify(x)} value={JSON.stringify(x)}>
               {x.kind === "github" ? "GitHub" : sourceLabel(x)}
@@ -224,28 +249,37 @@ function Graph({ repoKey }: { repoKey: string }) {
       </div>
       {err && <div className="banner err">{err}</div>}
       <div style={{ flex: 1, minHeight: 0 }}>
-        <Split id="gitgraph" className="graph-split" initial={0.64}>
-          <div ref={parentRef} style={{ height: "100%", overflow: "auto" }}>
+        <Split id="gitgraph" className="graph-split workspace-split" initial={0.64} showSecond={!!selCommit}>
+          <div ref={parentRef} style={{ height: "100%", overflow: "auto" }} onScroll={() => { if (hover) setHover(null); }}>
             <div style={{ height: virt.getTotalSize(), position: "relative" }}>
-              {virt.getVirtualItems().map((vi) => {
+              {virtualRows.map((vi) => {
                 const r = rows[vi.index]!;
                 const c = r.commit;
                 const color = COLORS[r.lane % COLORS.length];
                 return (
                   <div key={c.sha} className={`graph-row ${sel === c.sha ? "selected" : ""}`} style={{ position: "absolute", top: 0, left: 0, right: 0, transform: `translateY(${vi.start}px)`, height: ROW_H }} onClick={() => setSel(c.sha)}>
-                    <svg width={width} height={ROW_H} style={{ flex: "none" }} aria-hidden>
-                      {r.passThrough.map((l) => (
-                        <line key={`p${l}`} x1={l * LANE_W + 8} x2={l * LANE_W + 8} y1={0} y2={ROW_H} stroke={COLORS[l % COLORS.length]} strokeWidth={2} />
+                    <svg width={width} height={ROW_H} className="graph-dot" aria-hidden="true">
+                      {dividers.map((lane) => (
+                        <line key={lane} className="graph-branch-divider" x1={lane * LANE_W + 8} x2={lane * LANE_W + 8}
+                          y1={0} y2={ROW_H} stroke="var(--text-3)" strokeOpacity={0.65} strokeLinecap="round" strokeDasharray="1 3" pointerEvents="none" />
                       ))}
-                      {vi.index > 0 && <line x1={r.lane * LANE_W + 8} x2={r.lane * LANE_W + 8} y1={0} y2={ROW_H / 2} stroke={color} strokeWidth={2} />}
-                      {r.edges.map((e, i) => (
-                        <path key={i} d={`M ${e.fromLane * LANE_W + 8} ${ROW_H / 2} C ${e.fromLane * LANE_W + 8} ${ROW_H}, ${e.toLane * LANE_W + 8} ${ROW_H / 2}, ${e.toLane * LANE_W + 8} ${ROW_H}`} stroke={COLORS[e.toLane % COLORS.length]} strokeWidth={2} fill="none" />
+                      {r.passThrough.map((lane) => (
+                        <line key={lane} x1={lane * LANE_W + 8} x2={lane * LANE_W + 8} y1={0} y2={ROW_H} stroke={COLORS[lane % COLORS.length]} strokeWidth={2} />
                       ))}
-                      <circle cx={r.lane * LANE_W + 8} cy={ROW_H / 2} r={c.parents.length > 1 ? 3 : 5} fill={c.parents.length > 1 ? "var(--panel)" : color} stroke={color} strokeWidth={2} />
+                      {(r.hasIncoming ?? vi.index > 0) && <line x1={r.lane * LANE_W + 8} x2={r.lane * LANE_W + 8} y1={0} y2={ROW_H / 2} stroke={color} strokeWidth={2} />}
+                      {r.edges.map((edge, i) => (
+                        <path key={i} d={`M ${edge.fromLane * LANE_W + 8} ${ROW_H / 2} C ${edge.fromLane * LANE_W + 8} ${ROW_H}, ${edge.toLane * LANE_W + 8} ${ROW_H / 2}, ${edge.toLane * LANE_W + 8} ${ROW_H}`} stroke={COLORS[edge.toLane % COLORS.length]} strokeWidth={2} fill="none" />
+                      ))}
+                      <circle cx={r.lane * LANE_W + 8} cy={ROW_H / 2} r={c.parents.length > 1 ? 4 : 5}
+                        fill={c.parents.length > 1 ? "var(--panel)" : color} stroke={color} strokeWidth="2"
+                        onMouseEnter={(e) => {
+                          const target = e.currentTarget.getBoundingClientRect();
+                          setHover({ commit: c, x: target.right, y: target.bottom });
+                        }} onMouseLeave={() => setHover(null)} />
                     </svg>
                     <span className="row grow" style={{ minWidth: 0, gap: 4 }}>
                       {refsBySha.get(c.sha)?.map((x) => (
-                        <span key={x.name} className={`ref ${x.kind === "tag" ? "tag" : ""}`}>
+                        <span key={refKey(x)} className={`ref ${x.kind === "tag" ? "tag" : ""}`}>
                           {x.kind === "tag" ? "🏷 " : ""}
                           {x.name}
                         </span>
@@ -262,7 +296,7 @@ function Graph({ repoKey }: { repoKey: string }) {
                       ))}
                       <span className="ellipsis grow">{c.message.split("\n")[0]}</span>
                     </span>
-                    <span className="faint small" style={{ width: 110, flex: "none" }}>
+                    <span className="faint small ellipsis graph-author" title={c.author}>
                       {c.author}
                     </span>
                     <span className="mono faint small" style={{ width: 70, flex: "none" }}>
@@ -277,9 +311,18 @@ function Graph({ repoKey }: { repoKey: string }) {
             </div>
             {commits.length > 0 && rows.some((r) => r.commit.parents.some((p) => !index.has(p))) && <div className="faint small" style={{ padding: 8 }}>History truncated at loaded depth — ancestry beyond this point is unknown.</div>}
           </div>
-          <div style={{ height: "100%", overflow: "auto" }}>{selCommit ? <CommitDetail repoKey={repoKey} c={selCommit} refs={refs} local={local} src={src} /> : <div className="empty">Select a commit</div>}</div>
+          {selCommit && <div style={{ height: "100%", overflow: "auto" }}>
+            <div className="inbox-detail-header"><span>Commit details</span><button className="btn ghost sm" aria-label="Close commit details" onClick={() => setSel(null)}>✕</button></div>
+            <CommitDetail repoKey={repoKey} c={selCommit} refs={refs} local={local} src={src} />
+          </div>}
         </Split>
       </div>
+      {hover && <div className="panel pad small graph-tooltip" role="tooltip" style={{ left: Math.min(hover.x + 8, window.innerWidth - 326), top: Math.min(hover.y + 8, window.innerHeight - 110) }}>
+        <div className="mono">{hover.commit.sha.slice(0, 12)} {refsBySha.get(hover.commit.sha)?.map((ref) => ref.name).join(" · ")}</div>
+        <b>{hover.commit.message.split("\n")[0]}</b>
+        <div className="faint">{hover.commit.author} · {new Date(hover.commit.committedAt).toLocaleString()}</div>
+      </div>}
+
     </>
   );
 }
@@ -386,24 +429,6 @@ function CommitDetail({ repoKey, c, refs, local, src }: { repoKey: string; c: Co
           <CommitDiff text={diff} />
         </Modal>
       )}
-    </div>
-  );
-}
-
-function CommitDiff({ text }: { text: string }) {
-  const ix = useMemo(() => indexPatch(text), [text]);
-  const [i, setI] = useState(0);
-  const f = ix.files[i];
-  return (
-    <div className="row" style={{ height: "60vh", alignItems: "stretch" }}>
-      <div style={{ width: 220, overflow: "auto" }}>
-        {ix.files.map((x, k) => (
-          <div key={x.path} className={`tree-row ${k === i ? "active" : ""}`} onClick={() => setI(k)}>
-            <span className="ellipsis">{x.path}</span>
-          </div>
-        ))}
-      </div>
-      <div className="grow" style={{ minWidth: 0 }}>{f && <FileDiff key={f.path} section={text.slice(f.start, f.end)} mode="unified" />}</div>
     </div>
   );
 }

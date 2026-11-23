@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { parsePRRef, prKey } from "@nonlinear/core";
 import { useApp } from "../lib/store";
-import { useOverlayPresence } from "./ui";
+import { useAnimatedPresence } from "./ui";
 import { invoke, isDesktop } from "../lib/platform";
 import { useActions } from "../lib/keys";
 
@@ -20,7 +20,7 @@ export function CommandPalette() {
   const nav = useNavigate();
   const location = useLocation();
   const inputRef = useRef<HTMLInputElement>(null);
-  const present = useOverlayPresence(open);
+  const present = useAnimatedPresence(open);
   const lastPress = useRef(0);
   const pointer = useRef<{ x: number; y: number } | null>(null);
   useEffect(() => {
@@ -113,7 +113,7 @@ export function CommandPalette() {
         <input
           ref={inputRef}
           value={q}
-          placeholder="Type a command, PR (owner/repo#123 or URL), view…"
+          data-workspace-search placeholder="Type a command, PR (owner/repo#123 or URL), view…"
           onChange={(e) => {
             setQ(e.target.value);
             setIdx(0);

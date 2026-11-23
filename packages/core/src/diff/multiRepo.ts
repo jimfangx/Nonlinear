@@ -31,6 +31,9 @@ export interface MultiRepoDiff {
 
 export interface ImportOptions {
   name?: string;
+  format?: "unified";
+  rootRef?: string;
+  rootRepo?: { owner: string; repo: string; url: string };
   /** path -> repo, from .gitmodules of the root repository at the chosen commit */
   submodules?: Map<string, { owner: string; repo: string; url: string }>;
   now?: number;
@@ -49,7 +52,7 @@ export function importMultiRepoDiff(jsonText: string, opts: ImportOptions = {}):
   if (jsonText.length > LARGE_IMPORT_WARN_BYTES) issues.push(`Import is ${(jsonText.length / 1048576).toFixed(1)} MB, above the 50 MB target; rendering will be chunked.`);
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonText);
+    parsed = opts.format === "unified" ? splitUnifiedDiff(jsonText, opts.submodules) : JSON.parse(jsonText);
   } catch (e) {
     throw new Error(`Invalid JSON: ${(e as Error).message}`);
   }
@@ -79,13 +82,22 @@ export function importMultiRepoDiff(jsonText: string, opts: ImportOptions = {}):
     }
     const index = indexPatch(value);
     gIssues.push(...index.issues);
-    let repo: RepoGroup["repo"] = undefined;
+    if (opts.format === "unified" && path) {
+      const localPath = (name: string) => name.startsWith(path + "/") ? name.slice(path.length + 1) : name;
+      for (const file of index.files) {
+        file.path = localPath(file.path);
+        if (file.oldPath) file.oldPath = localPath(file.oldPath);
+        if (file.newPath) file.newPath = localPath(file.newPath);
+      }
+    }
+    let repo: RepoGroup["repo"] = path === "" ? opts.rootRepo : undefined;
     if (opts.submodules) {
-      repo = path === "" ? null : opts.submodules.get(path) ?? null;
+      repo = path === "" ? (opts.rootRepo ?? null) : opts.submodules.get(path) ?? null;
       if (path !== "" && !repo) gIssues.push("Unknown submodule path (not in .gitmodules)");
     }
     groups.push({ path, originalKey: key, patch: value, patchHash: fnv1a(value), index, repo, issues: gIssues });
   }
+  if (opts.format === "unified" && !groups.some((group) => group.index.files.length)) throw new Error("No files found in this unified diff.");
   groups.sort((a, b) => (a.path === "" ? -1 : b.path === "" ? 1 : a.path.localeCompare(b.path)));
   const totals = groups.reduce(
     (t, g) => ({ files: t.files + g.index.files.length, additions: t.additions + g.index.additions, deletions: t.deletions + g.index.deletions }),
@@ -93,7 +105,7 @@ export function importMultiRepoDiff(jsonText: string, opts: ImportOptions = {}):
   );
   const contentHash = fnv1a(jsonText);
   return {
-    id: `diff_${contentHash}`,
+    id: `diff_${opts.rootRepo ? fnv1a(JSON.stringify([contentHash, opts.rootRepo.url.toLowerCase(), opts.rootRef ?? null])) : contentHash}`,
     name: opts.name ?? "Imported diff",
     importedAt: opts.now ?? Date.now(),
     sourceBytes: jsonText.length,
@@ -102,6 +114,43 @@ export function importMultiRepoDiff(jsonText: string, opts: ImportOptions = {}):
     issues,
     totals,
   };
+}
+
+/** Git emits a summary before embedded patches in --submodule=diff output. */
+function splitUnifiedDiff(text: string, repositories: ImportOptions["submodules"]): Record<string, string> {
+  const summary = /^Submodule (.+?) ([a-f0-9]{7,64})\.\.\.?([a-f0-9]{7,64})(?::|[^\n]*)$/gm;
+  const markers = [...text.matchAll(summary)].filter((match) => !isUnsafePath(match[1]!));
+  if (!markers.length && !repositories?.size) return { "": text };
+  const groups = new Map<string, string[]>();
+  const append = (path: string, section: string) => {
+    const parts = groups.get(path) ?? [];
+    parts.push(section.endsWith("\n") ? section : section + "\n");
+    groups.set(path, parts);
+  };
+  const paths = [...new Set([...(repositories?.keys() ?? []), ...markers.map((marker) => marker[1]!)])].sort((a, b) => b.length - a.length);
+  const addFiles = (part: string) => {
+    const index = indexPatch(part);
+    for (const file of index.files) {
+      const submodule = paths.find((path) => file.path.startsWith(path + "/") && (!file.oldPath || file.oldPath.startsWith(path + "/")) && (!file.newPath || file.newPath.startsWith(path + "/")));
+      append(submodule ?? "", part.slice(file.start, file.end));
+    }
+  };
+  let offset = 0;
+  for (const marker of markers) {
+    const [header, path, oldSha, newSha] = marker;
+    addFiles(text.slice(offset, marker.index));
+    if (oldSha !== newSha) {
+      const patch = [
+        `diff --git a/${path} b/${path}`, `index ${oldSha}..${newSha} 160000`,
+        `--- a/${path}`, `+++ b/${path}`, "@@ -1 +1 @@", `-Subproject commit ${oldSha}`, `+Subproject commit ${newSha}`,
+      ].join("\n");
+      const parent = paths.find((candidate) => path!.startsWith(candidate + "/"));
+      append(parent ?? "", patch);
+    }
+    offset = marker.index + header.length;
+  }
+  addFiles(text.slice(offset));
+  return Object.fromEntries([...groups].map(([path, parts]) => [path, parts.join("")]));
 }
 
 export function fileSection(group: RepoGroup, f: DiffFileEntry): string {

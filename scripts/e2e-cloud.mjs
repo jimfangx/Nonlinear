@@ -30,7 +30,7 @@ await A.screenshot({ path: `${SHOTS}/cloud-A-connected.png` });
 // Device A creates a card and syncs
 await A.goto(`${APP}/#/board`);
 await A.getByRole("button", { name: "+ Card" }).click();
-await A.locator(".modal input").first().fill("Synced feature card");
+await A.getByRole("complementary", { name: "Feature card" }).getByRole("textbox", { name: "Title", exact: true }).fill("Synced feature card");
 await A.getByRole("button", { name: "Done" }).click();
 await A.goto(`${APP}/#/settings`);
 await A.getByRole("button", { name: "Sync now" }).click();
@@ -67,6 +67,32 @@ const setPin = (page, sha) => page.evaluate((sha) => {
 }, sha);
 for (const p of [A, B]) { await p.evaluate(() => localStorage.setItem("nl:test", "1")); await p.reload(); await p.waitForTimeout(500); }
 const syncNow = async (p) => { await p.goto(`${APP}/#/settings`); await p.getByRole("button", { name: "Sync now" }).click(); await p.getByText(/Pushed \d+, pulled \d+/).last().waitFor({ timeout: 10000 }); await p.waitForTimeout(300); };
+await A.goto(`${APP}/#/timeline?new=1`);
+await A.getByLabel("Root repository").fill("ucb-bar/chipyard");
+await A.getByLabel(/Root commit/).fill("a".repeat(40));
+await A.getByRole("button", { name: "Create", exact: true }).click();
+await A.waitForURL(/#\/timeline\/tl_/);
+const timelineId = new URL(A.url()).hash.split("/").at(-1);
+await A.evaluate((id) => window.__nl.getState().patch("timelines", id, { zoom: "month", zoomScale: 2.75 }), timelineId);
+await syncNow(A);
+await syncNow(B);
+await B.goto(`${APP}/#/timeline`);
+await B.getByRole("button", { name: "Remove timeline ucb-bar/chipyard@main" }).waitFor();
+check("Timeline created on A appears on B", true);
+const timeline = (page) => page.evaluate((id) => window.__nl.getState().timelines[id], timelineId);
+const onB = await timeline(B);
+check("Custom timeline zoom and fixed commit round-trip", onB?.zoomScale === 2.75 && onB?.rootSha === "a".repeat(40));
+await A.evaluate((id) => window.__nl.getState().patch("timelines", id, { rootSha: null }), timelineId);
+await syncNow(A);
+await syncNow(B);
+check("Following the branch clears the fixed commit on the other device", (await timeline(B))?.rootSha === null);
+await B.goto(`${APP}/#/timeline`);
+await B.getByRole("button", { name: "Remove timeline ucb-bar/chipyard@main" }).click();
+await B.getByRole("button", { name: "Remove view", exact: true }).click();
+await syncNow(B);
+await syncNow(A);
+check("Timeline removal is synced to A", await A.evaluate((id) => !window.__nl.getState().timelines[id], timelineId));
+
 await setPin(A, "a".repeat(40));
 await syncNow(A);
 await syncNow(B);

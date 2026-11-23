@@ -105,7 +105,7 @@ export async function maybeRunSelftest(): Promise<boolean> {
     }
     return true;
   };
-  for (const [route, heading] of [["#/inbox", /repository view|Chipyard|view/i], ["#/timeline", /Timelines?/], ["#/board", /Board/], ["#/review", /Review/], ["#/diff", /Multi-Repository Diff/], ["#/graph", /Git Graph/], ["#/releases", /Releases/], ["#/settings", /Settings/]] as const) {
+  for (const [route, heading] of [["#/inbox", /\S/], ["#/timeline", /Timelines?/], ["#/board", /Board/], ["#/review", /Review/], ["#/diff", /Multi-Repository Diff/], ["#/graph", /Git Graph/], ["#/releases", /Releases/], ["#/settings", /Settings/]] as const) {
     await check(`ui: navigate ${route}`, async () => {
       location.hash = route;
       const ok = await waitFor(() => [...document.querySelectorAll("main h1")].some((h) => heading.test(h.textContent ?? "")));
@@ -119,8 +119,8 @@ export async function maybeRunSelftest(): Promise<boolean> {
     const btn = findBtn();
     if (!btn) throw new Error("+ Card button not found");
     btn.click();
-    if (!(await waitFor(() => !!document.querySelector(".modal input")))) throw new Error("card editor did not open");
-    const input = document.querySelector(".modal input") as HTMLInputElement;
+    if (!(await waitFor(() => !!document.querySelector(".board-details input[aria-label=Title]")))) throw new Error("card editor did not open");
+    const input = document.querySelector(".board-details input[aria-label=Title]") as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
     setter.call(input, "Desktop selftest card");
     input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -134,7 +134,7 @@ export async function maybeRunSelftest(): Promise<boolean> {
     throw new Error(`shown=${shown} stored=${!!rec} cards=[${[...document.querySelectorAll(".card")].map((c) => c.textContent).join("|")}] titles=[${(await loadAll()).filter((r) => r.collection === "cards").map((r) => (r.value as { title?: string }).title).join("|")}]`);
   });
   await check("ui: command palette opens with ⌘K", async () => {
-    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, ctrlKey: !/mac/i.test(navigator.platform), bubbles: true }));
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: /mac/i.test(navigator.platform), ctrlKey: !/mac/i.test(navigator.platform), bubbles: true }));
     return waitFor(() => !!document.querySelector(".palette input"), 3000);
   });
   await check("security: rejects unsafe git revision", async () => {

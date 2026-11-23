@@ -1,6 +1,6 @@
 import { useShallow } from "zustand/react/shallow";
-import { useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   columnCards,
   moveCard,
@@ -12,7 +12,11 @@ import {
   type FeatureCard,
 } from "@nonlinear/core";
 import { useApp, useSettings } from "../lib/store";
-import { Modal } from "../components/ui";
+import { Split } from "../components/ui";
+import { useActions } from "../lib/keys";
+import { CachedEntry } from "../components/CachedEntry";
+import { useCachedRepositories } from "../components/RepositoryShortcuts";
+import { renderMarkdown } from "../lib/markdown";
 import { useChainGraph } from "../lib/chains";
 
 /** Feature kanban (§4): shared cards, per-context placements. */
@@ -29,7 +33,30 @@ export function Board() {
   const [filter, setFilter] = useState("");
   const [dragging, setDragging] = useState<string | null>(null);
   const [dropCol, setDropCol] = useState<string | null>(null);
-  const [editing, setEditing] = useState<FeatureCard | null>(null);
+  const [params, setParams] = useSearchParams();
+  const editing = cards[params.get("card") ?? ""];
+  const openCard = (card: FeatureCard | null) => setParams((previous) => {
+    const next = new URLSearchParams(previous);
+    if (card) next.set("card", card.id);
+    else next.delete("card");
+    return next;
+  }, { replace: true });
+  const createCard = () => {
+    const card = newCardInContext(newId("card"), "New feature", ctx);
+    useApp.getState().put("cards", card.id, card);
+    openCard(card);
+  };
+  useEffect(() => {
+    if (!editing) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || document.querySelector(".overlay:not([inert]), #workspace-content[inert]")) return;
+      event.preventDefault();
+      openCard(null);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [editing, setParams]);
+  useActions({ newCard: (event) => { if (!event.repeat) createCard(); } });
   const [focused, setFocused] = useState<string | null>(null);
   const placements = useMemo(() => Object.values(placementsRec), [placementsRec]);
   const allCards = useMemo(() => Object.values(cards).filter((c) => !c.deleted && (!filter || `${c.title} ${c.description} ${c.repos.join(" ")}`.toLowerCase().includes(filter.toLowerCase()))), [cards, filter]);
@@ -43,7 +70,7 @@ export function Board() {
     const ci = columns.findIndex((x) => x.id === p.column);
     const colCards = columnCards(allCards, placements, ctx, p.column, columns);
     const idx = colCards.findIndex((x) => x.id === c.id);
-    if (e.key === "Enter") return setEditing(c);
+    if (e.key === "Enter") return openCard(c);
     if (!e.altKey && !e.shiftKey) return;
     if (e.key === "ArrowRight" && ci < columns.length - 1) { e.preventDefault(); move(c.id, columns[ci + 1]!.id, 0); }
     if (e.key === "ArrowLeft" && ci > 0) { e.preventDefault(); move(c.id, columns[ci - 1]!.id, 0); }
@@ -72,20 +99,18 @@ export function Board() {
             ))}
           </optgroup>
         </select>
-        <input className="input" placeholder="Filter cards" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <input className="input" data-workspace-search placeholder="Filter cards" value={filter} onChange={(e) => setFilter(e.target.value)} />
         <span className="faint small">Placement is per board; content is shared. Alt+Arrows moves the focused card.</span>
         <span className="spacer" />
         <button
           className="btn primary sm"
-          onClick={() => {
-            const c = newCardInContext(newId("card"), "New feature", ctx);
-            useApp.getState().put("cards", c.id, c);
-            setEditing(c);
-          }}
+          onClick={createCard}
         >
           + Card
         </button>
       </div>
+      <div className="board-layout">
+      <Split id="board-details" className="workspace-split" initial={0.63} showSecond={!!editing && !editing.deleted}>
       <div className="board" tabIndex={0} aria-label="Board columns (scroll horizontally)">
         {columns.map((col) => {
           const cs = columnCards(allCards, placements, ctx, col.id, columns);
@@ -115,14 +140,16 @@ export function Board() {
               </div>
               <div className="cards">
                 {cs.map((c) => (
-                  <CardView key={c.id} card={c} dragging={dragging === c.id} focused={focused === c.id} onFocus={() => setFocused(c.id)} onDragStart={() => setDragging(c.id)} onDragEnd={() => setDragging(null)} onOpen={() => setEditing(c)} onKeyDown={keyMove(c)} />
+                  <CardView key={c.id} card={c} dragging={dragging === c.id} focused={focused === c.id} onFocus={() => setFocused(c.id)} onDragStart={() => setDragging(c.id)} onDragEnd={() => setDragging(null)} onOpen={() => openCard(c)} onKeyDown={keyMove(c)} />
                 ))}
               </div>
             </section>
           );
         })}
       </div>
-      {editing && <CardEditor card={cards[editing.id] ?? editing} onClose={() => setEditing(null)} />}
+      {editing && !editing.deleted && <CardEditor key={editing.id} card={editing} onClose={() => openCard(null)} />}
+      </Split>
+      </div>
     </div>
   );
 }
@@ -147,7 +174,7 @@ function CardView({ card, dragging, focused, onFocus, onDragStart, onDragEnd, on
         onDragStart();
       }}
       onDragEnd={onDragEnd}
-      onDoubleClick={onOpen}
+      onClick={onOpen}
       onKeyDown={onKeyDown}
       aria-label={card.title}
       style={focused ? { borderColor: "var(--accent)" } : undefined}
@@ -180,42 +207,31 @@ function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void 
   const prs = useApp((s) => s.prs);
   const placements = useApp(useShallow((s) => Object.values(s.placements).filter((p) => p.cardId === card.id)));
   const columns = useSettings().columns;
-  const [c, setC] = useState(card);
+  const c = card;
+  const repositories = useCachedRepositories();
   const [prIn, setPrIn] = useState("");
   const [item, setItem] = useState("");
   const [repoIn, setRepoIn] = useState("");
-  const [link, setLink] = useState({ title: "", url: "" });
-  const save = (next: FeatureCard) => {
-    setC(next);
-    put("cards", next.id, { ...next, updatedAt: Date.now() });
+  const save = (next: FeatureCard) => put("cards", next.id, { ...next, updatedAt: Date.now() });
+  const linkPR = (value: string) => {
+    const pr = parsePRKey(value.trim());
+    if (!pr) return;
+    save({ ...c, prs: [...new Set([...c.prs, `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase()])] });
+    setPrIn("");
+  };
+  const linkRepo = (value: string) => {
+    const repo = value.trim().toLowerCase();
+    if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) return;
+    save({ ...c, repos: [...new Set([...c.repos, repo])] });
+    setRepoIn("");
   };
   return (
-    <Modal
-      title="Feature card"
-      onClose={onClose}
-      wide
-      footer={
-        <>
-          <button
-            className="btn danger"
-            onClick={() => {
-              save({ ...c, deleted: true });
-              onClose();
-            }}
-          >
-            Delete
-          </button>
-          <span className="spacer" />
-          <button className="btn primary" onClick={onClose}>
-            Done
-          </button>
-        </>
-      }
-    >
-      <div className="col">
+    <aside className="board-details" aria-label="Feature card" data-search-pane>
+      <div className="inbox-detail-header"><span>Feature card</span><button className="btn ghost sm" aria-label="Close card" onClick={onClose}>✕</button></div>
+      <div className="col pad">
         <input className="input" style={{ fontSize: 16, fontWeight: 600 }} value={c.title} onChange={(e) => save({ ...c, title: e.target.value })} aria-label="Title" />
-        <textarea className="input" value={c.description} placeholder="Description / completion criteria" onChange={(e) => save({ ...c, description: e.target.value })} />
-        <div className="row" style={{ alignItems: "flex-start", gap: 16 }}>
+        <MarkdownField label="Description / completion criteria" value={cardDescription(c)} onChange={(description) => save({ ...c, description, links: [] })} />
+        <div className="col" style={{ gap: 16 }}>
           <div className="grow col">
             <h3 className="h3">Checklist</h3>
             {c.checklist.map((it) => (
@@ -244,31 +260,11 @@ function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void 
                 </div>
               );
             })}
-            <input className="input" value={prIn} placeholder="owner/repo#123 + Enter" onChange={(e) => setPrIn(e.target.value)} onKeyDown={(e) => { const r = parsePRKey(prIn.trim()); if (e.key === "Enter" && r) { save({ ...c, prs: [...new Set([...c.prs, `${r.owner}/${r.repo}#${r.number}`.toLowerCase()])] }); setPrIn(""); } }} />
-
-            <h3 className="h3">Links & attachments</h3>
-            {c.links.map((l, i) => (
-              <div key={i} className="row small">
-                <a href={l.url} target="_blank" rel="noreferrer" className="grow">
-                  {l.title || l.url}
-                </a>
-                <button className="btn ghost sm" onClick={() => save({ ...c, links: c.links.filter((_, j) => j !== i) })}>
-                  ✕
-                </button>
-              </div>
-            ))}
-            <div className="row">
-              <input className="input" placeholder="Title" value={link.title} onChange={(e) => setLink({ ...link, title: e.target.value })} />
-              <input className="input grow" placeholder="https://…" value={link.url} onChange={(e) => setLink({ ...link, url: e.target.value })} />
-              <button className="btn sm" disabled={!/^https?:\/\//.test(link.url)} onClick={() => { save({ ...c, links: [...c.links, link] }); setLink({ title: "", url: "" }); }}>
-                Add
-              </button>
-            </div>
-
-            <h3 className="h3">Private notes</h3>
-            <textarea aria-label="Private notes" className="input" value={c.notes} onChange={(e) => save({ ...c, notes: e.target.value })} />
+            <CachedEntry label="Link pull request" placeholder="owner/repo#123 + Enter" value={prIn} onChange={setPrIn} onSelect={linkPR}
+              options={Object.values(prs).filter((pr) => !c.prs.includes(pr.key)).map((pr) => ({ value: pr.key, detail: pr.title }))} />
+            <MarkdownField label="Private notes" value={c.notes ?? ""} onChange={(notes) => save({ ...c, notes })} />
           </div>
-          <div className="col" style={{ width: 260 }}>
+          <div className="col">
             <h3 className="h3">Releases</h3>
             {Object.values(releases).map((r) => (
               <label key={r.id} className="row small">
@@ -285,7 +281,8 @@ function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void 
                 </button>
               </div>
             ))}
-            <input className="input" value={repoIn} placeholder="owner/repo + Enter" onChange={(e) => setRepoIn(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && /^[^/\s]+\/[^/\s]+$/.test(repoIn)) { save({ ...c, repos: [...new Set([...c.repos, repoIn.toLowerCase()])] }); setRepoIn(""); } }} />
+            <CachedEntry label="Link repository" placeholder="owner/repo + Enter" value={repoIn} onChange={setRepoIn} onSelect={linkRepo}
+              options={repositories.filter((repo) => !c.repos.includes(repo)).map((value) => ({ value }))} />
             <h3 className="h3">Depends on cards</h3>
             <select aria-label="Add card dependency" className="input" value="" onChange={(e) => e.target.value && save({ ...c, dependsOn: [...new Set([...c.dependsOn, e.target.value])] })}>
               <option value="">Add dependency…</option>
@@ -312,7 +309,36 @@ function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void 
             {!placements.length && <div className="small faint">Default column on every board</div>}
           </div>
         </div>
+        <div className="row">
+          <button className="btn danger" onClick={() => { save({ ...c, deleted: true }); onClose(); }}>Delete</button>
+          <span className="spacer" />
+          <button className="btn primary" onClick={onClose}>Done</button>
+        </div>
       </div>
-    </Modal>
+    </aside>
   );
+}
+
+
+function cardDescription(card: FeatureCard): string {
+  if (!card.links.length) return card.description;
+  const links = card.links.map(({ title, url }) => {
+    const label = (title || url).replace(/[\\\[\]]/g, "\\$&").replace(/[\r\n]/g, " ");
+    return `- [${label}](<${url.replace(/[<>\s]/g, encodeURIComponent)}>)`;
+  });
+  return [card.description, links.join("\n")].filter(Boolean).join("\n\n");
+}
+
+function MarkdownField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+  const [editing, setEditing] = useState(false);
+  return <section className="col">
+    <div className="row">
+      <h3 className="h3 grow">{label}</h3>
+      {value && <button className="btn ghost sm" onClick={() => setEditing(!editing)}>{editing ? "Preview" : "Edit Markdown"}</button>}
+    </div>
+    {editing || !value
+      ? <textarea className="input board-markdown" aria-label={label} placeholder="Markdown supported" value={value}
+          onFocus={() => setEditing(true)} onChange={(e) => onChange(e.target.value)} />
+      : <div className="md panel pad" dangerouslySetInnerHTML={{ __html: renderMarkdown(value) }} />}
+  </section>;
 }

@@ -57,7 +57,7 @@ pub fn ensure_mirror(data_dir: &Path, repo_key: &str, fetch: bool) -> Result<Pat
 
 /// Fetch a bounded timeline ref into a bare object cache. The root needs trees
 /// for .gitmodules and gitlinks, while child history needs only commit objects.
-pub fn timeline_fetch(data_dir: &Path, repo_key: &str, rev: &str, depth: usize, trees: bool, since: Option<&str>) -> Result<(PathBuf, String), GitError> {
+pub fn timeline_fetch(data_dir: &Path, repo_key: &str, rev: &str, depth: usize, trees: bool, since: Option<&str>, refresh: bool) -> Result<(PathBuf, String), GitError> {
     let (url, owner, repo) = github_url(repo_key)?;
     let cache = data_dir.join(if trees { "timeline-trees" } else { "timeline-history" }).join(owner).join(repo);
     let depth = depth.clamp(1, 20_000);
@@ -69,6 +69,14 @@ pub fn timeline_fetch(data_dir: &Path, repo_key: &str, rev: &str, depth: usize, 
         })
     });
     if since.is_some() && window.is_none() { return Err(GitError("expected YYYY-MM-DD".into())); }
+    // Shallow boundaries and promisor objects are repository-wide. Don't mix independent
+    // refs in one bare store or a deep fetch can negotiate against an incomplete graph.
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    rev.hash(&mut hasher);
+    let cache = if window.is_none() && !trees && (rev.starts_with("refs/heads/") || rev.starts_with("refs/tags/")) {
+        cache.join(format!("ref-v2-{:016x}", hasher.finish()))
+    } else { cache };
     let slot = match window {
         Some(date) => format!("refs/nonlinear/since/{date}/{rev}"),
         None => format!("refs/nonlinear/{depth}/{rev}"),
@@ -76,13 +84,13 @@ pub fn timeline_fetch(data_dir: &Path, repo_key: &str, rev: &str, depth: usize, 
     let locks = TIMELINE_LOCKS.get_or_init(|| std::array::from_fn(|_| std::sync::Mutex::new(())));
     let bucket = cache.to_string_lossy().bytes().map(usize::from).sum::<usize>() % locks.len();
     let _guard = locks[bucket].lock().map_err(|e| GitError(e.to_string()))?;
-    timeline_fetch_from(&url, &cache, rev, &slot, depth, trees, window)?;
+    timeline_fetch_from(&url, &cache, rev, &slot, depth, trees, window, refresh)?;
     Ok((cache, slot))
 }
 
 static TIMELINE_LOCKS: std::sync::OnceLock<[std::sync::Mutex<()>; 32]> = std::sync::OnceLock::new();
 
-fn timeline_fetch_from(url: &str, cache: &Path, rev: &str, slot: &str, depth: usize, trees: bool, since: Option<&str>) -> Result<(), GitError> {
+fn timeline_fetch_from(url: &str, cache: &Path, rev: &str, slot: &str, depth: usize, trees: bool, since: Option<&str>, refresh: bool) -> Result<(), GitError> {
     std::fs::create_dir_all(cache).map_err(|e| GitError(e.to_string()))?;
     let short = Duration::from_secs(10);
     git_global(&["check-ref-format", slot], cache, short)?;
@@ -104,7 +112,7 @@ fn timeline_fetch_from(url: &str, cache: &Path, rev: &str, slot: &str, depth: us
     if let Ok(age) = std::fs::metadata(&stamp).and_then(|m| m.modified()).and_then(|m| {
         m.elapsed().map_err(std::io::Error::other)
     }) {
-        if age < Duration::from_secs(30 * 60) { return Ok(()); }
+        if !refresh && age < Duration::from_secs(30 * 60) { return Ok(()); }
     }
 
     git_global(&["config", "remote.origin.url", url], cache, short)?;
@@ -112,16 +120,23 @@ fn timeline_fetch_from(url: &str, cache: &Path, rev: &str, slot: &str, depth: us
     git_global(&["config", "credential.helper", ""], cache, short)?;
     git_global(&["config", "remote.origin.partialclonefilter", filter], cache, short)?;
     let refspec = format!("+{rev}:{slot}");
-    let fetch = |history: &str| git_global(&[
-        "-c", "credential.helper=", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+    let fetch = |history: &str, negotiate: &str| git_global(&[
+        "-c", "credential.helper=", "-c", negotiate, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-auto-gc",
         &format!("--filter={filter}"), history, "origin", &refspec,
     ], cache, Duration::from_secs(90));
+    let fetch_with_retry = |history: &str| {
+        match fetch(history, "fetch.negotiationAlgorithm=consecutive") {
+            Err(err) if err.0.contains("pack-objects") || err.0.contains("index-pack failed") =>
+                fetch(history, "fetch.negotiationAlgorithm=noop"),
+            result => result,
+        }
+    };
     let depth_arg = format!("--depth={depth}");
     let fetched = match since {
-        Some(date) => fetch(&format!("--shallow-since={date}T00:00:00Z")).or_else(|_| fetch("--depth=1")),
-        None => fetch(&depth_arg),
+        Some(date) => fetch_with_retry(&format!("--shallow-since={date}T00:00:00Z")).or_else(|_| fetch_with_retry("--depth=1")),
+        None => fetch_with_retry(&depth_arg),
     };
-    if fetched.is_err() && git_global(&["show-ref", "--verify", "--quiet", slot], cache, short).is_ok() {
+    if !refresh && (since.is_some() || trees) && fetched.is_err() && git_global(&["show-ref", "--verify", "--quiet", slot], cache, short).is_ok() {
         return Ok(());
     }
     fetched?;
@@ -226,6 +241,7 @@ mod tests {
         git(&src, &["add", "."]);
         git(&src, &["commit", "-qm", "one"]);
         let first = String::from_utf8(Command::new("git").args(["rev-parse", "HEAD"]).current_dir(&src).output().unwrap().stdout).unwrap().trim().to_string();
+        git(&src, &["tag", "-am", "First release", "v1"]);
         std::fs::write(src.join("a.txt"), "two").unwrap();
         git(&src, &["commit", "-qam", "two"]);
         git(&src, &["config", "uploadpack.allowFilter", "true"]);
@@ -234,20 +250,26 @@ mod tests {
         let data = base.join("data");
         let url = format!("file://{}", src.display());
         let thin = data.join("timeline");
-        timeline_fetch_from(&url, &thin, "HEAD", "refs/nonlinear/1/HEAD", 1, true, None).unwrap();
+        timeline_fetch_from(&url, &thin, "HEAD", "refs/nonlinear/1/HEAD", 1, true, None, false).unwrap();
         let tip = crate::git::log(&thin, "refs/nonlinear/1/HEAD", 10).unwrap();
         assert_eq!(tip.len(), 1);
         assert_eq!(crate::git::show_file(&thin, &tip[0].sha, "a.txt").unwrap(), "two");
         let history = data.join("history");
-        timeline_fetch_from(&url, &history, "HEAD", "refs/nonlinear/2/HEAD", 2, false, None).unwrap();
+        timeline_fetch_from(&url, &history, "HEAD", "refs/nonlinear/2/HEAD", 2, false, None, false).unwrap();
         let log = crate::git::log(&history, "refs/nonlinear/2/HEAD", 10).unwrap();
         assert_eq!(log.len(), 2);
         assert_eq!(log[1].sha, first);
-        timeline_fetch_from(&url, &history, &first, "refs/nonlinear/pin", 1, false, None).unwrap();
+        let tagged = data.join("tagged-history");
+        let tag_slot = "refs/nonlinear/2/refs/tags/v1";
+        timeline_fetch_from(&url, &tagged, "refs/tags/v1", tag_slot, 2, false, None, false).unwrap();
+        let tag_log = crate::git::log(&tagged, tag_slot, 10).unwrap();
+        assert_eq!(tag_log.len(), 1);
+        assert_eq!(tag_log[0].sha, first);
+        timeline_fetch_from(&url, &history, &first, "refs/nonlinear/pin", 1, false, None, false).unwrap();
         assert_eq!(crate::git::log(&history, "refs/nonlinear/pin", 1).unwrap()[0].sha, first);
-        assert!(timeline_fetch_from(&url, &history, "--all", "refs/nonlinear/--all", 1, false, None).is_err());
+        assert!(timeline_fetch_from(&url, &history, "--all", "refs/nonlinear/--all", 1, false, None, false).is_err());
         let dated = data.join("dated-history");
-        timeline_fetch_from(&url, &dated, "HEAD", "refs/nonlinear/since/2000-01-01/HEAD", 1, false, Some("2000-01-01")).unwrap();
+        timeline_fetch_from(&url, &dated, "HEAD", "refs/nonlinear/since/2000-01-01/HEAD", 1, false, Some("2000-01-01"), false).unwrap();
         assert_eq!(crate::git::log(&dated, "refs/nonlinear/since/2000-01-01/HEAD", 10).unwrap().len(), 2);
         let m = ensure_mirror_from(&url, &data.join("mirrors/o/r.git"), false).unwrap();
         assert!(m.join("HEAD").exists());
@@ -258,6 +280,12 @@ mod tests {
         assert_eq!(std::fs::read_to_string(wt.join("a.txt")).unwrap(), "one");
         assert_eq!(worktree_at(&data, &m, "o__r", &first).unwrap(), wt);
         assert!(worktree_at(&data, &m, "bad label", &first).is_err());
+        git(&src, &["commit", "--allow-empty", "-qm", "three"]);
+        let root_slot = "refs/nonlinear/1/HEAD";
+        timeline_fetch_from(&url, &thin, "HEAD", root_slot, 1, true, None, false).unwrap();
+        assert_eq!(crate::git::log(&thin, root_slot, 1).unwrap()[0].sha, tip[0].sha);
+        timeline_fetch_from(&url, &thin, "HEAD", root_slot, 1, true, None, true).unwrap();
+        assert_eq!(crate::git::log(&thin, root_slot, 1).unwrap()[0].message.trim(), "three");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

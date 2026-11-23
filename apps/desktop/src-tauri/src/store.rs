@@ -3,7 +3,7 @@
 //! Secrets are NOT stored here (OS keychain instead).
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -11,7 +11,7 @@ pub struct Store {
     conn: Mutex<Connection>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Record {
     pub collection: String,
     pub id: String,
@@ -59,6 +59,21 @@ impl Store {
         Ok(())
     }
 
+    pub fn restore(&self, records: &[Record], blobs: &[(String, String)]) -> rusqlite::Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        for record in records {
+            tx.execute(
+                "INSERT OR REPLACE INTO records (collection, id, value, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params![record.collection, record.id, record.value.to_string(), record.updated_at],
+            )?;
+        }
+        for (key, value) in blobs {
+            tx.execute("INSERT OR REPLACE INTO blobs (key, value) VALUES (?1, ?2)", params![key, value])?;
+        }
+        tx.commit()
+    }
+
     pub fn delete(&self, collection: &str, id: &str) -> rusqlite::Result<()> {
         self.conn.lock().unwrap().execute("DELETE FROM records WHERE collection = ?1 AND id = ?2", params![collection, id])?;
         Ok(())
@@ -103,6 +118,14 @@ impl Store {
 
     pub fn wipe(&self) -> rusqlite::Result<()> {
         self.conn.lock().unwrap().execute_batch("DELETE FROM records; DELETE FROM blobs; DELETE FROM outbox;")
+    }
+
+    /// Delete everything and give the space back to the OS (VACUUM + truncate the WAL).
+    pub fn wipe_and_compact(&self) -> rusqlite::Result<()> {
+        let c = self.conn.lock().unwrap();
+        c.execute_batch("DELETE FROM records; DELETE FROM blobs; DELETE FROM outbox;")?;
+        c.execute_batch("VACUUM;")?;
+        c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
     }
 }
 

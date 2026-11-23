@@ -1,10 +1,35 @@
-import { useMemo, useRef, useState, useEffect, type ReactNode } from "react";
+import { useMemo, useRef, useState, useEffect, useLayoutEffect, type ReactNode } from "react";
+import { CodeText } from "./CodeText";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { parseFileHunks, toSplitRows, contains, type DiffLine, type Hunk, type FileReviewState, type Interval } from "@nonlinear/core";
 
 const LINE_HEIGHT = 20;
 
 export type DiffMode = "unified" | "split";
+export type DiffSide = "LEFT" | "RIGHT";
+export type DiffCodeLayout = "wrap" | "compact" | "scroll";
+
+export function useDiffCodeLayout(storageKey: string, fallback: DiffCodeLayout) {
+  const [layout, setLayout] = useState<DiffCodeLayout>(() => {
+    const saved = localStorage.getItem(storageKey);
+    return saved === "wrap" || saved === "compact" || saved === "scroll" ? saved : fallback;
+  });
+  const changeLayout = (next: DiffCodeLayout) => {
+    setLayout(next);
+    localStorage.setItem(storageKey, next);
+  };
+  return [layout, changeLayout] as const;
+}
+
+export function DiffCodeLayoutSelect({ layout, onChange }: { layout: DiffCodeLayout; onChange: (layout: DiffCodeLayout) => void }) {
+  return <select className="input" value={layout} aria-label="Code layout" onChange={(event) => onChange(event.currentTarget.value as DiffCodeLayout)}>
+    <option value="wrap">Wrap lines</option>
+    <option value="compact">Smaller text</option>
+    <option value="scroll">Horizontal scroll</option>
+  </select>;
+}
+
+type LineTarget = { line: DiffLine; ri: number; side?: DiffSide };
 
 /** One display row. `ri` = review row index (into flattened hunk lines) or null. */
 type Row =
@@ -20,6 +45,7 @@ export interface ReviewOverlay {
 }
 
 export interface FileDiffProps {
+  path?: string;
   section: string;
   mode: DiffMode;
   /** extra context lines above hunk i (from semantic expansion) */
@@ -27,13 +53,22 @@ export interface FileDiffProps {
   onExpand?: (hunkIndex: number, hunk: Hunk) => void;
   review?: ReviewOverlay;
   selection?: Interval | null;
-  onSelect?: (iv: Interval | null, anchor: { line: DiffLine; ri: number } | null) => void;
+  selectionSide?: DiffSide;
+  onSelect?: (iv: Interval, endpoint: LineTarget) => void;
   highlight?: string;
   /** annotations per review row (comments/notes markers) */
   annotations?: Map<number, ReactNode>;
-  onLineContext?: (event: React.MouseEvent, ri: number, line: DiffLine) => void;
+  onLineContext?: (event: React.MouseEvent, ri: number, line: DiffLine, side?: DiffSide) => void;
   height?: number | string;
+  layout: DiffCodeLayout;
   scrollToRow?: number | null;
+  scrollKey?: string;
+  /** find-in-file matches per review row ([col, len]) and the current match */
+  find?: { byRow: Map<number, [number, number][]>; current: { ri: number; col: number } | null } | null;
+  /** scroll a review row into the middle of the view (bump `n` to repeat) */
+  reveal?: { ri: number; n: number } | null;
+  /** click on a code cell (used for Cmd/Ctrl+click go-to-definition) */
+  onCodeClick?: (event: React.MouseEvent, ri: number, line: DiffLine, side?: DiffSide) => void;
 }
 
 export function useHunks(section: string): Hunk[] {
@@ -41,7 +76,8 @@ export function useHunks(section: string): Hunk[] {
 }
 
 export function FileDiff(props: FileDiffProps) {
-  const { section, mode, expansions, onExpand, review, selection, onSelect, highlight, annotations, onLineContext } = props;
+  const { section, mode, layout, expansions, onExpand, review, selection, onSelect, highlight, annotations, onLineContext, find, onCodeClick } = props;
+  const wrap = layout !== "scroll";
   const hunks = useHunks(section);
   const diffRows = useMemo(() => {
     const out: Row[] = [];
@@ -75,26 +111,101 @@ export function FileDiff(props: FileDiffProps) {
   }, [diffRows, annotations]);
 
   const totalRows = useMemo(() => hunks.reduce((n, h) => n + h.lines.length, 0), [hunks]);
+  const jumpIndex = props.scrollToRow == null ? -1 : rows.findIndex((row) => row.t === "line" ? row.ri >= props.scrollToRow! : row.t === "split" && row.ri.some((ri) => ri >= props.scrollToRow!));
   const parentRef = useRef<HTMLDivElement>(null);
   const virt = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
+    initialOffset: () => props.scrollKey ? Number(localStorage.getItem(props.scrollKey)) || 0 : 0,
     estimateSize: (i) => rows[i]?.t === "annotation" ? 100 : LINE_HEIGHT,
     getItemKey: (i) => {
       const row = rows[i];
-      return row?.t === "annotation" ? `annotation:${row.ri}` : i;
+      switch (row?.t) {
+        case "annotation": return `annotation:${row.ri}`;
+        case "hunk": return `hunk:${row.hi}`;
+        case "ctx": return `ctx:${row.no}`;
+        case "line": return `line:${row.ri}`;
+        case "split": return `split:${row.ri.join(",")}`;
+        default: return i;
+      }
     },
     overscan: 30,
   });
-  const layoutHeight = virt.getTotalSize();
-  const [anchor, setAnchor] = useState<number | null>(null);
-  useEffect(() => { if (!selection) setAnchor(null); }, [selection]);
-
   useEffect(() => {
-    if (props.scrollToRow == null) return;
-    const i = rows.findIndex((r) => (r.t === "line" && r.ri >= props.scrollToRow!) || (r.t === "split" && r.ri.some((x) => x >= props.scrollToRow!)));
-    if (i >= 0) virt.scrollToIndex(i, { align: "start" });
-  }, [props.scrollToRow, rows, virt]);
+    const element = parentRef.current;
+    const key = props.scrollKey;
+    if (!element || !key) return;
+    let timeout: number | undefined;
+    let latest = element.scrollTop;
+    const save = () => localStorage.setItem(key, String(latest));
+    const onScroll = () => {
+      latest = element.scrollTop;
+      window.clearTimeout(timeout);
+      timeout = window.setTimeout(save, 160);
+    };
+    element.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("pagehide", save);
+    return () => {
+      window.clearTimeout(timeout);
+      element.removeEventListener("scroll", onScroll);
+      window.removeEventListener("pagehide", save);
+      save();
+    };
+  }, [props.scrollKey]);
+  const longest = useMemo(() => {
+    if (wrap) return 0;
+    const length = (text: string) => text.replace(/\t/g, "    ").length;
+    let max = 0;
+    for (const row of diffRows) {
+      if (row.t === "hunk") max = Math.max(max, length(row.hunk.header));
+      if (row.t === "line") max = Math.max(max, length(row.line.text));
+      if (row.t === "split") max = Math.max(max, length(row.left?.text ?? ""), length(row.right?.text ?? ""));
+      if (row.t === "ctx") max = Math.max(max, length(row.text));
+    }
+    return max;
+  }, [diffRows, wrap]);
+  const layoutHeight = virt.getTotalSize();
+  const anchor = useRef<Pick<LineTarget, "ri" | "side"> | null>(null);
+  const drag = useRef<{ pointerId: number; start: number; end: number; y: number; side?: DiffSide } | null>(null);
+  const dragFrame = useRef(0);
+  const suppressGestureClick = useRef(false);
+  const currentRows = useRef(rows);
+  currentRows.current = rows;
+  const onSelectRef = useRef(onSelect);
+  onSelectRef.current = onSelect;
+  useEffect(() => { if (!selection) anchor.current = null; }, [selection]);
+  useEffect(() => () => cancelAnimationFrame(dragFrame.current), []);
+
+  const latestJumpIndex = useRef(jumpIndex);
+  latestJumpIndex.current = jumpIndex;
+  useEffect(() => {
+    if (props.scrollToRow != null && latestJumpIndex.current >= 0) virt.scrollToIndex(latestJumpIndex.current, { align: "start" });
+  }, [props.scrollToRow, virt]);
+  const latestRows = useRef(rows);
+  latestRows.current = rows;
+  useEffect(() => {
+    const target = props.reveal;
+    if (!target) return;
+    const index = latestRows.current.findIndex((row) => row.t === "line" ? row.ri === target.ri : row.t === "split" && row.ri.includes(target.ri));
+    if (index < 0) return;
+    const el = parentRef.current;
+    const item = virt.measurementsCache[index];
+    const visible = el && item && item.start >= el.scrollTop + 20 && item.end <= el.scrollTop + el.clientHeight - 20;
+    if (!visible) virt.scrollToIndex(index, { align: "center" });
+    // bring the current match into view horizontally (scroll layout)
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const mark = parentRef.current?.querySelector("mark.find-current");
+      if (mark && parentRef.current) {
+        const box = mark.getBoundingClientRect();
+        const view = parentRef.current.getBoundingClientRect();
+        if (box.left < view.left + 140 || box.right > view.right - 20) parentRef.current.scrollLeft += box.left - view.left - view.width / 2;
+      }
+    }));
+  }, [props.reveal?.n, virt]);
+  useLayoutEffect(() => {
+    virt.measure();
+    for (const row of parentRef.current?.querySelectorAll<HTMLElement>("[data-index]") ?? []) virt.measureElement(row);
+  }, [layout, virt]);
 
   const reviewedAt = (ri: number) => {
     if (!review) return "";
@@ -105,28 +216,80 @@ export function FileDiff(props: FileDiffProps) {
     return "";
   };
 
-  const clickLine = (e: React.MouseEvent, ri: number, line: DiffLine) => {
-    if (!onSelect) return;
-    if (e.shiftKey && anchor !== null) {
-      onSelect([Math.min(anchor, ri), Math.max(anchor, ri) + 1], { line, ri });
-    } else {
-      setAnchor(ri);
-      onSelect([ri, ri + 1], { line, ri });
-    }
+  const selectThrough = (start: number, target: LineTarget) => {
+    onSelectRef.current?.([Math.min(start, target.ri), Math.max(start, target.ri) + 1], target);
   };
 
-  const hl = (text: string): ReactNode => {
-    if (!highlight) return text;
-    const i = text.toLowerCase().indexOf(highlight.toLowerCase());
-    if (i < 0) return text;
-    return (
-      <>
-        {text.slice(0, i)}
-        <mark>{text.slice(i, i + highlight.length)}</mark>
-        {text.slice(i + highlight.length)}
-      </>
-    );
+  const gutter = (line: DiffLine | null, ri: number | undefined, side?: DiffSide) => {
+    if (!onSelect || !line || ri === undefined || (line.oldNo === null && line.newNo === null)) return {};
+    return {
+      "data-review-gutter": true,
+      onPointerDown(event: React.PointerEvent<HTMLElement>) {
+        if (event.button !== 0 || event.ctrlKey || event.metaKey || !event.isPrimary || !parentRef.current) return;
+        event.preventDefault();
+        document.getSelection()?.removeAllRanges();
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        const start = event.shiftKey && (mode === "unified" || anchor.current?.side === side) ? anchor.current?.ri ?? ri : ri;
+        anchor.current = { ri: start, side };
+        drag.current = { pointerId: event.pointerId, start, end: ri, side, y: event.clientY };
+        suppressGestureClick.current = true;
+        parentRef.current.setPointerCapture(event.pointerId);
+        selectThrough(start, { line, ri, side });
+      },
+    };
   };
+
+  const moveSelection = (autoScroll: boolean) => {
+    const active = drag.current;
+    const element = parentRef.current;
+    if (!active || !element) return;
+    const bounds = element.getBoundingClientRect();
+    const y = active.y - bounds.top;
+    const height = element.clientHeight;
+    const distance = y < 24 ? y - 24 : y > height - 24 ? y - (height - 24) : 0;
+    const before = element.scrollTop;
+    if (autoScroll && distance) element.scrollTop += Math.max(-28, Math.min(28, distance / 2));
+    const item = virt.getVirtualItemForOffset(element.scrollTop + Math.min(height - 1, Math.max(0, y)));
+    const row = item && currentRows.current[item.index];
+    if (row?.t === "line" && row.ri !== active.end && row.line.kind !== "meta") {
+      active.end = row.ri;
+      selectThrough(active.start, { line: row.line, ri: row.ri, side: active.side });
+    } else if (row?.t === "split") {
+      const right = active.side === "RIGHT";
+      const line = right ? row.right : row.left;
+      const ri = right ? row.ri.at(-1) : row.ri[0];
+      if (line && ri !== undefined && ri !== active.end) {
+        active.end = ri;
+        selectThrough(active.start, { line, ri, side: active.side });
+      }
+    }
+    if (autoScroll && before !== element.scrollTop) scheduleSelectionFrame();
+  };
+
+  const scheduleSelectionFrame = () => {
+    if (dragFrame.current) return;
+    dragFrame.current = requestAnimationFrame(() => {
+      dragFrame.current = 0;
+      moveSelection(true);
+    });
+  };
+  const finishSelection = (event: React.PointerEvent<HTMLDivElement>, applyEndpoint = false) => {
+    if (drag.current?.pointerId !== event.pointerId) return;
+    if (applyEndpoint && drag.current.y !== event.clientY) {
+      drag.current.y = event.clientY;
+      moveSelection(false);
+    } else if (applyEndpoint && dragFrame.current) moveSelection(false);
+    drag.current = null;
+    cancelAnimationFrame(dragFrame.current);
+    dragFrame.current = 0;
+  };
+
+  const hl = (text: string, ri?: number) => {
+    const marks = ri === undefined ? undefined : find?.byRow.get(ri);
+    const current = find?.current;
+    return <CodeText path={props.path} text={text} query={marks ? undefined : highlight} marks={marks} currentCol={marks && current && current.ri === ri ? current.col : undefined} />;
+  };
+
 
   const selected = (ri: number) => !!selection && ri >= selection[0] && ri < selection[1];
 
@@ -176,8 +339,22 @@ export function FileDiff(props: FileDiffProps) {
   if (!hunks.length) return <div className="empty small">No textual changes (binary, mode-only, rename-only, or empty patch).</div>;
 
   return (
-    <div ref={parentRef} className="diff diff-scroll" style={{ height: props.height ?? "100%" }}>
-      <div className="diff-content" style={{ height: layoutHeight }}>
+    <div ref={parentRef} className={`diff diff-scroll ${wrap ? "wrap-code" : ""} ${layout === "compact" ? "compact-code" : ""}`} style={{ height: props.height ?? "100%" }}
+      onPointerDownCapture={() => { suppressGestureClick.current = false; }}
+      onPointerMove={(event) => {
+        if (drag.current?.pointerId !== event.pointerId) return;
+        drag.current.y = event.clientY;
+        scheduleSelectionFrame();
+      }}
+      onPointerUp={(event) => finishSelection(event, true)}
+      onPointerCancel={finishSelection}
+      onLostPointerCapture={finishSelection}
+      onClickCapture={(event) => {
+        if (!event.detail || !suppressGestureClick.current) return;
+        suppressGestureClick.current = false;
+        event.stopPropagation();
+      }}>
+      <div className="diff-content" style={{ height: layoutHeight, width: wrap ? undefined : `calc(${mode === "split" ? longest * 2 : longest}ch + ${(mode === "split" ? 155 : 135) + (review ? 18 : 0)}px)` }}>
       {review && totalRows > 0 && (
         <div
           ref={railRef}
@@ -211,18 +388,19 @@ export function FileDiff(props: FileDiffProps) {
         <div className="diff-rows">
           {virt.getVirtualItems().map((vi) => {
             const r = rows[vi.index]!;
+            const measure = wrap ? { ref: virt.measureElement, "data-index": vi.index } : {};
             const style = { position: "absolute" as const, top: 0, left: 0, right: 0, transform: `translateY(${vi.start}px)` };
             if (r.t === "annotation") {
               return <div key={vi.key} ref={virt.measureElement} data-index={vi.index} className="diff-annotation" style={style}>{annotations?.get(r.ri)}</div>;
             }
             if (r.t === "hunk") {
               return (
-                <div key={vi.key} style={style} className="dl hunk">
+                <div key={vi.key} {...measure} style={style} className="dl hunk">
                   <span className="no" />
                   <span className="no">
                     {onExpand && (
-                      <button className="btn ghost sm" style={{ height: 18, padding: "0 4px" }} title="Expand to enclosing block" onClick={() => onExpand(r.hi, r.hunk)}>
-                        ⤒
+                      <button className="btn ghost sm" style={{ height: 18, padding: "0 4px" }} aria-expanded={expansions?.has(r.hi) ?? false} title={expansions?.has(r.hi) ? "Collapse expanded context" : "Expand to enclosing block"} onClick={() => onExpand(r.hi, r.hunk)}>
+                        {expansions?.has(r.hi) ? "⤓" : "⤒"}
                       </button>
                     )}
                   </span>
@@ -233,11 +411,11 @@ export function FileDiff(props: FileDiffProps) {
             }
             if (r.t === "ctx") {
               return (
-                <div key={vi.key} style={style} className="dl" title={r.label ? `Expanded (${r.label})` : "Expanded context"}>
-                  <span className="no">{r.no}</span>
+                <div key={vi.key} {...measure} style={style} className="dl" title={r.label ? `Expanded (${r.label})` : "Expanded context"}>
+                  <span className="no" />
                   <span className="no">{r.no}</span>
                   <span className="sign"> </span>
-                  <span className="code faint">{r.text}</span>
+                  <span className="code faint">{hl(r.text)}</span>
                 </div>
               );
             }
@@ -245,16 +423,16 @@ export function FileDiff(props: FileDiffProps) {
               const l = r.line;
               const cls = l.kind === "add" ? "add" : l.kind === "del" ? "del" : "";
               return (
-                <div key={vi.key} style={style} className={`dl ${cls} ${reviewedAt(r.ri)} ${selected(r.ri) ? "sel" : ""}`} onContextMenu={(e) => onLineContext?.(e, r.ri, l)}>
-                  <span className="no" onClick={(e) => clickLine(e, r.ri, l)}>
+                <div key={vi.key} {...measure} style={style} className={`dl ${cls} ${reviewedAt(r.ri)} ${selected(r.ri) ? "sel" : ""}`} onContextMenu={(e) => onLineContext?.(e, r.ri, l)}>
+                  <span className="no" {...gutter(l, r.ri, "LEFT")}>
                     {l.oldNo ?? ""}
                   </span>
-                  <span className="no" onClick={(e) => clickLine(e, r.ri, l)}>
+                  <span className="no" {...gutter(l, r.ri, "RIGHT")}>
                     {l.newNo ?? ""}
                   </span>
                   <span className="sign">{l.kind === "add" ? "+" : l.kind === "del" ? "−" : l.kind === "meta" ? "\\" : " "}</span>
-                  <span className="code">
-                    {hl(l.text)}
+                  <span className="code" onClick={onCodeClick ? (e) => onCodeClick(e, r.ri, l) : undefined}>
+                    {hl(l.text, r.ri)}
                   </span>
                 </div>
               );
@@ -262,26 +440,29 @@ export function FileDiff(props: FileDiffProps) {
             const left = r.left;
             const right = r.right;
             const rc = r.ri.map(reviewedAt).find(Boolean) ?? "";
-            const sel = r.ri.some(selected);
+            const leftSelected = props.selectionSide !== "RIGHT" && !!left && selected(r.ri[0]!);
+            const rightSelected = props.selectionSide !== "LEFT" && !!right && selected(r.ri[r.ri.length - 1]!);
             return (
-              <div key={vi.key} style={style} className={`dl split-line ${rc} ${sel ? "sel" : ""}`} onContextMenu={(e) => {
+              <div key={vi.key} {...measure} style={style} className={`dl split-line ${rc} ${leftSelected || rightSelected ? "sel" : ""}`}
+                data-selected-left={leftSelected || undefined} data-selected-right={rightSelected || undefined}
+                onContextMenu={(e) => {
                 const cell = e.target instanceof Element ? e.target.closest(".dl > span") : null;
                 const useRight = !left || (!!right && cell !== null && Array.from(e.currentTarget.children).indexOf(cell) >= 3);
                 const line = useRight ? right : left;
                 const i = useRight ? r.ri.at(-1) : r.ri[0];
-                if (line && i !== undefined) onLineContext?.(e, i, line);
+                if (line && i !== undefined) onLineContext?.(e, i, line, useRight ? "RIGHT" : "LEFT");
               }}>
-                <span className={`no ${left && left.kind === "del" ? "del" : ""}`} onClick={(e) => left && clickLine(e, r.ri[0]!, left)}>
+                <span className={`no ${left && left.kind === "del" ? "del" : ""}`} {...gutter(left, r.ri[0], "LEFT")}>
                   {left?.oldNo ?? ""}
                 </span>
                 <span className={`sign ${left?.kind === "del" ? "del" : left ? "" : "empty-side"}`}>{left?.kind === "del" ? "−" : " "}</span>
-                <span className={`code ${left?.kind === "del" ? "del" : left ? "" : "empty-side"}`}>{left ? hl(left.text) : ""}</span>
-                <span className={`no ${right?.kind === "add" ? "add" : ""}`} onClick={(e) => right && clickLine(e, r.ri[r.ri.length - 1]!, right)}>
+                <span className={`code ${left?.kind === "del" ? "del" : left ? "" : "empty-side"}`} onClick={onCodeClick && left ? (e) => onCodeClick(e, r.ri[0]!, left, "LEFT") : undefined}>{left ? hl(left.text, r.ri[0]) : ""}</span>
+                <span className={`no ${right?.kind === "add" ? "add" : ""}`} {...gutter(right, r.ri.at(-1), "RIGHT")}>
                   {right?.newNo ?? ""}
                 </span>
                 <span className={`sign ${right?.kind === "add" ? "add" : right ? "" : "empty-side"}`}>{right?.kind === "add" ? "+" : " "}</span>
-                <span className={`code ${right?.kind === "add" ? "add" : right ? "" : "empty-side"}`}>
-                  {right ? hl(right.text) : ""}
+                <span className={`code ${right?.kind === "add" ? "add" : right ? "" : "empty-side"}`} onClick={onCodeClick && right ? (e) => onCodeClick(e, r.ri.at(-1)!, right, "RIGHT") : undefined}>
+                  {right ? hl(right.text, r.ri.at(-1)) : ""}
                 </span>
               </div>
             );

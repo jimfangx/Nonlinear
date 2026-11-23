@@ -2,6 +2,7 @@
 // Prereqs: built web app served (vite preview :4173) and `node scripts/mock-github.mjs 4010`.
 // Usage: node scripts/e2e.mjs [appUrl] [mockUrl]
 import { chromium } from "playwright-core";
+import { createMockInboxView } from "./mock-inbox.mjs";
 
 const APP = process.argv[2] ?? "http://localhost:4173";
 const MOCK = process.argv[3] ?? "http://localhost:4010";
@@ -39,8 +40,8 @@ await step("setup", async () => {
 // ---- Journey A: cross-org inbox ----
 await step("A inbox", async () => {
   await page.goto(`${APP}/#/inbox`);
-  await page.getByRole("button", { name: /Use “Chipyard integration” example/ }).click();
-  await page.getByText("Bump BOOM for i34 fix").first().waitFor({ timeout: 15000 });
+  await createMockInboxView(page);
+  await page.getByText("Bump BOOM for iteration 95").first().waitFor({ timeout: 15000 });
   await page.getByRole("tab", { name: /Needs my review/ }).click();
   const needs = await page.locator(".list-row").allTextContents();
   check("A: 'Needs my review' contains chipyard#789", needs.some((t) => t.includes("Bump BOOM")), `${needs.length} rows`);
@@ -96,12 +97,12 @@ await step("D review", async () => {
   // private note
   await nos.nth(5).click();
   await page.getByRole("button", { name: "✎ Private note" }).click();
-  await page.getByRole("textbox", { name: "Private note" }).fill("Check poisoned-wakeup interaction with load speculation");
+  await page.getByRole("textbox", { name: "Private note" }).fill("Confirm this default matches the release config");
   await page.getByRole("button", { name: "Save note" }).click();
   // draft GitHub comment
   await nos.nth(6).click();
   await page.keyboard.press("c");
-  await page.getByRole("textbox", { name: "Draft GitHub comment" }).fill("Could this filter drop a valid wakeup?");
+  await page.getByRole("textbox", { name: "Draft GitHub comment" }).fill("Could this filter drop a valid update?");
   await page.getByRole("button", { name: "Save draft" }).click();
   check("D: selected review ranges render notes and drafts inline", await page.locator(".diff-annotation details").count() === 2);
   await page.keyboard.press("Escape");
@@ -112,7 +113,7 @@ await step("D review", async () => {
   await page.reload();
   await page.locator(".rail").waitFor({ timeout: 10000 });
   const fr = await page.locator(".rail").getAttribute("aria-valuenow");
-  check("D: progress + note survive offline reopen", Number(fr) > 0 && (await page.getByText("Check poisoned-wakeup").count()) > 0, `frontier=${fr}`);
+  check("D: progress + note survive offline reopen", Number(fr) > 0 && (await page.getByText("Confirm this default").count()) > 0, `frontier=${fr}`);
   await ctx.setOffline(false);
   // Submit review: the draft comment goes to GitHub; the private note does not.
   await page.getByRole("button", { name: /Submit review \(1\)/ }).click();
@@ -120,7 +121,7 @@ await step("D review", async () => {
   await page.getByRole("button", { name: "Submit to GitHub" }).click();
   await page.getByText("Review submitted to GitHub").waitFor({ timeout: 10000 });
   const revs = await (await fetch(`${MOCK}/repos/ucb-bar/chipyard/pulls/789/comments`)).json();
-  check("D: GitHub comment posted; private note not posted", revs.some((c) => c.body.includes("drop a valid wakeup")) && !JSON.stringify(revs).includes("poisoned-wakeup interaction"));
+  check("D: GitHub comment posted; private note not posted", revs.some((c) => c.body.includes("drop a valid update")) && !JSON.stringify(revs).includes("matches the release config"));
   // New commit modifies one reviewed hunk
   await page.locator(".rail").focus();
   await page.keyboard.press("End");
@@ -188,13 +189,25 @@ await step("B reconcile", async () => {
 await step("C timeline", async () => {
   await page.goto(`${APP}/#/releases`);
   await page.getByRole("button", { name: "+ New release" }).click();
+  const release = page.getByRole("dialog", { name: "New release" });
+  check("New releases have a blank name and repository", await release.getByLabel("Name", { exact: true }).inputValue() === "" && await release.getByLabel("Root repository").inputValue() === "");
+  await release.getByLabel("Name", { exact: true }).fill("Chipyard vNext");
+  await release.getByLabel("Root repository").fill("ucb-bar/chipyard");
   await page.getByRole("button", { name: "Create" }).click();
   await page.goto(`${APP}/#/timeline`);
   await page.getByRole("button", { name: "New timeline" }).click();
+  const timeline = page.getByRole("dialog", { name: "New timeline view" });
+  check("New timelines require an explicit repository", await timeline.getByLabel("Root repository").inputValue() === "" && await timeline.getByRole("button", { name: "Create" }).isDisabled());
+  await timeline.getByLabel("Root repository").fill("ucb-bar/chipyard");
   await page.getByRole("button", { name: "Create" }).click();
   await page.locator(".tl-row", { hasText: "generators/boom" }).waitFor({ timeout: 15000 });
   await page.locator(".tl-row", { hasText: "generators/boom" }).getByText("PR #124").waitFor({ timeout: 15000 });
   check("§3.1: open upstream PR shown on the submodule row", true);
+  await page.locator(".tl .tl-label").first().click();
+  await page.keyboard.press("j");
+  await page.locator(".tl-row.highlighted").first().waitFor();
+  await page.keyboard.press("Escape");
+  check("Timeline J selects a submodule and Escape clears it", (await page.locator(".tl-row.highlighted").count()) === 0);
   await page.getByLabel("Release to edit").selectOption({ index: 1 });
   const handle = page.getByRole("slider", { name: /Chipyard vNext pin for generators\/boom/ });
   await handle.focus();
@@ -236,6 +249,16 @@ await step("graph", async () => {
   await page.goto(`${APP}/#/graph/ucb-bar/chipyard`);
   await page.locator(".graph-row").first().waitFor({ timeout: 10000 });
   check("§7: git graph renders lanes", (await page.locator(".graph-row").count()) >= 6);
+  const refs = page.getByRole("combobox", { name: "Add branch or tag" });
+  await refs.selectOption("tag:v1.0.0");
+  await page.getByRole("button", { name: "Remove tag v1.0.0" }).waitFor();
+  check("Git Graph can add a tag as a comparison ref", true);
+  await page.locator(".graph-row").first().click();
+  const close = page.getByRole("button", { name: "Close commit details" });
+  await close.focus();
+  await page.keyboard.press("Escape");
+  await close.waitFor({ state: "hidden" });
+  check("Escape closes Git Graph commit details", true);
   await shot("graph");
 });
 

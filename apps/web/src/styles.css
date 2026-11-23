@@ -461,6 +461,14 @@ html.has-bg body { background: transparent; }
 html.has-bg .topbar { background: color-mix(in srgb, var(--panel) 72%, transparent); backdrop-filter: blur(10px); }
 html.has-bg .sidebar { background: color-mix(in srgb, var(--bg-2) 62%, transparent); backdrop-filter: blur(10px); }
 html.has-bg .panel, html.has-bg .toolbar, html.has-bg .tabs { background: color-mix(in srgb, var(--panel) 86%, transparent); }
+/* One even veil over the whole work area, so the image shows through uniformly
+   (gaps, gutters and unchanged lines no longer show it at full strength). */
+html.has-bg .workspace-content { background: color-mix(in srgb, var(--bg) 55%, transparent); }
+/* Inside it, surfaces that used to be solid blend in instead of punching holes. */
+html.has-bg .dl .empty-side { background: color-mix(in srgb, var(--bg-2) 55%, transparent); }
+html.has-bg .dl.hunk { background: color-mix(in srgb, var(--hunk-bg) 80%, transparent); }
+html.has-bg .dl.add, html.has-bg .dl .add { --diff-line-bg: color-mix(in srgb, var(--add-bg) 85%, transparent); }
+html.has-bg .dl.del, html.has-bg .dl .del { --diff-line-bg: color-mix(in srgb, var(--del-bg) 85%, transparent); }
 .theme-swatches { display: flex; flex-wrap: wrap; gap: 8px; }
 .theme-swatch { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px 4px 6px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer; font: inherit; }
 .theme-swatch[aria-pressed="true"] { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
@@ -516,6 +524,8 @@ html.has-bg .panel, html.has-bg .toolbar, html.has-bg .tabs { background: color-
 .selection-slot { height: 36px; flex: none; }
 .selection-slot .selection-bar { height: 36px; min-height: 36px; flex-wrap: nowrap; overflow-x: auto; background: var(--accent-2); }
 .selection-slot .selection-bar > * { flex-shrink: 0; }
+/* With a background image, the empty slot (no lines selected) matches the toolbar above instead of showing the image. */
+html.has-bg .selection-slot { background: color-mix(in srgb, var(--panel) 86%, transparent); border-bottom: 1px solid var(--border); }
 .topbar-search { min-width: 0; width: min(29vw, 350px); }
 .topbar-search .grow { text-align: left; overflow: hidden; text-overflow: ellipsis; }
 .topbar-statuses, .topbar-account { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
@@ -617,3 +627,4 @@ html.has-bg .panel, html.has-bg .toolbar, html.has-bg .tabs { background: color-
 .ask-picker { padding: 4px 8px; gap: 6px; border-bottom: 1px solid var(--border); }
 .ask-picker select { min-width: 0; }
 .inbox-empty-repos { padding: 8px 12px; border-top: 1px solid var(--border); }
+html.has-bg .selection-slot .selection-bar { background: color-mix(in srgb, var(--accent-2) 92%, transparent); }

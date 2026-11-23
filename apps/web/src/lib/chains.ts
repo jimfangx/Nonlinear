@@ -36,10 +36,10 @@ export function blockedSet(graph: DependencyGraph, prs: Record<string, { state: 
 }
 
 /** Fetch referenced external PRs (read-only) so the chain shows real statuses. */
-export async function hydrateChain(members: PRKey[]): Promise<void> {
+export async function hydrateChain(members: PRKey[], max = 8): Promise<void> {
   const prs = useApp.getState().prs;
   const missing = members.filter((m) => !prs[m] && parsePRKey(m));
-  await Promise.all(missing.slice(0, 8).map((m) => ensurePR(m)));
+  await Promise.all(missing.slice(0, max).map((m) => ensurePR(m).catch(() => undefined)));
 }
 
 export function edgeId(from: PRKey, to: PRKey): string {

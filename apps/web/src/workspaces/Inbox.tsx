@@ -4,8 +4,9 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { CATEGORY_LABELS, prPercentReviewed, summarizeEvents, classify, isSnoozed, isUnread, newId, type Category, type PRSnapshot } from "@nonlinear/core";
 import { useApp, useSettings, type RepositoryView } from "../lib/store";
+import { findSubmoduleRepos } from "../lib/submodules";
 import { refreshRepos, describeError } from "../lib/github";
-import { useChainGraph, blockedSet } from "../lib/chains";
+import { useChainGraph, blockedSet, hydrateChain } from "../lib/chains";
 import { useActions } from "../lib/keys";
 import { RepoPicker } from "../components/RepoPicker";
 import { Split, Modal, CIChip, ReviewChip, PRStateChip, timeAgo } from "../components/ui";
@@ -91,6 +92,18 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
   const repoSet = useMemo(() => new Set(view.repos), [view.repos]);
   const viewPRs = useMemo(() => Object.values(prs).filter((p) => repoSet.has(`${p.owner}/${p.repo}`.toLowerCase())), [prs, repoSet]);
   const blocked = useMemo(() => blockedSet(graph, prs), [graph, prs]);
+  // A prerequisite Nonlinear hasn't loaded (e.g. in a repository outside this view) would count as
+  // unmerged and wrongly mark the PR "Blocked by chain". Load those prerequisites with the view.
+  const hydrated = useRef(new Set<string>());
+  useEffect(() => {
+    if (!useApp.getState().online) return;
+    const missing = new Set<string>();
+    for (const p of viewPRs) for (const a of graph.ancestors(p.key)) if (!prs[a] && !hydrated.current.has(a)) missing.add(a);
+    if (!missing.size) return;
+    const batch = [...missing].slice(0, 30);
+    batch.forEach((k) => hydrated.current.add(k));
+    void hydrateChain(batch, batch.length);
+  }, [viewPRs, graph, prs]);
   const ctx = useMemo(() => ({ me: settings.me, myTeams: settings.myTeams, blockedByChain: blocked, policy: settings.policy }), [settings.me, settings.myTeams, blocked, settings.policy]);
   const cats = useMemo(() => new Map(viewPRs.map((p) => [p.key, classify(p, ctx)])), [viewPRs, ctx]);
 
@@ -172,11 +185,12 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
     return [...groups.values()].sort((a, b) => a.label.localeCompare(b.label));
   }, [list, view.groupBy, cards, graph, releases]);
 
-  const refresh = async () => {
-    if (!view.repos.length) return;
+  const refresh = async (only?: string[]) => {
+    const targets = only ?? view.repos;
+    if (!targets.length) return;
     setBusy("Refreshing…");
     try {
-      const r = await refreshRepos(view.repos, (p) => setBusy(`Refreshing ${p.done}/${p.total}…`));
+      const r = await refreshRepos(targets, (p) => setBusy(`Refreshing ${p.done}/${p.total}…`));
       if (r.errors.length) toast("warn", r.errors.slice(0, 3).join("\n"));
     } catch (e) {
       toast("error", describeError(e));
@@ -184,6 +198,15 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
       setBusy(null);
     }
   };
+
+  // Repositories added to this view (e.g. its submodules) are fetched right away.
+  const knownRepos = useRef(new Set(view.repos));
+  useEffect(() => {
+    const added = view.repos.filter((r) => !knownRepos.current.has(r));
+    view.repos.forEach((r) => knownRepos.current.add(r));
+    if (added.length && useApp.getState().online) void refresh(added);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view.repos.join(",")]);
 
   useEffect(() => {
     const newest = Math.max(0, ...viewPRs.map((p) => p.fetchedAt));
@@ -311,6 +334,11 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
           );
         })}
       </div>
+      {view.groupBy === "repo" && (() => {
+        const shown = new Set(groups.map((g) => g.key.toLowerCase()));
+        const empty = view.repos.filter((r) => !shown.has(`repo:${r}`.toLowerCase()));
+        return empty.length ? <div className="faint small inbox-empty-repos" title={empty.join("\n")}>No {cat === "all-open" ? "open" : "matching"} PRs in {empty.length} repositor{empty.length === 1 ? "y" : "ies"}: {empty.map((r) => r.split("/").pop()).join(", ")}</div> : null;
+      })()}
     </div>
   );
 
@@ -456,6 +484,7 @@ function ViewEditor({ view, onClose }: { view: RepositoryView; onClose: () => vo
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} />
         </label>
         <RepoPicker value={repos} onChange={setRepos} />
+        <AddSubmodules repos={repos} onAdd={(found) => setRepos((cur) => [...cur, ...found.filter((k) => !cur.some((c) => c.toLowerCase() === k))])} />
       </div>
     </Modal>
   );
@@ -473,5 +502,51 @@ function MyReviewChip({ pr }: { pr: PRSnapshot }) {
       title={`${pct}% of this PR reviewed by you${outdated ? ". New commits since your last review: re-check the changed parts." : ""}`}>
       {done ? "✓ reviewed" : `${pct}% reviewed`}{outdated ? " ⟳" : ""}
     </span>
+  );
+}
+
+/** View editor: add every submodule repository of a selected repository (optionally nested ones too). */
+function AddSubmodules({ repos, onAdd }: { repos: string[]; onAdd: (found: string[]) => void }) {
+  const [root, setRoot] = useState("");
+  const [nested, setNested] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const toast = useApp((s) => s.toast);
+  const chosen = repos.includes(root) ? root : repos[0] ?? "";
+  if (!repos.length) return null;
+  const run = async () => {
+    setBusy(true);
+    setResult(null);
+    try {
+      const scan = await findSubmoduleRepos(chosen, { nested });
+      const fresh = scan.repos.filter((k) => !repos.some((r) => r.toLowerCase() === k));
+      onAdd(fresh);
+      const parts = [
+        !scan.repos.length ? `${chosen} has no submodules on GitHub`
+          : !fresh.length ? `All ${scan.repos.length} submodule repositor${scan.repos.length === 1 ? "y is" : "ies are"} already in the view`
+          : `Added ${fresh.length} submodule repositor${fresh.length === 1 ? "y" : "ies"}${fresh.length < scan.repos.length ? ` (${scan.repos.length - fresh.length} already in the view)` : ""}`,
+        scan.skipped.length ? `${scan.skipped.length} not on GitHub skipped` : "",
+        scan.errors.length ? `couldn't read ${scan.errors.join(", ")}` : "",
+      ].filter(Boolean);
+      setResult(parts.join(" · ") + ".");
+    } catch (e) {
+      toast("error", describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="panel pad col add-submodules" style={{ gap: 6 }}>
+      <b className="small">Add submodules</b>
+      <div className="row small" style={{ flexWrap: "wrap" }}>
+        <span className="faint">Add every submodule of</span>
+        <select className="input" aria-label="Repository whose submodules to add" value={chosen} onChange={(e) => setRoot(e.target.value)}>
+          {repos.map((r) => <option key={r} value={r}>{r}</option>)}
+        </select>
+        <label className="row"><input type="checkbox" checked={nested} onChange={(e) => setNested(e.target.checked)} /> include nested submodules</label>
+        <button type="button" className="btn sm" disabled={busy || !chosen} onClick={() => void run()}>{busy ? "Reading .gitmodules…" : "Add submodules"}</button>
+      </div>
+      {result && <div className="faint small" role="status">{result}</div>}
+    </div>
   );
 }

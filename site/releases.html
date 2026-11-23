@@ -58,6 +58,7 @@
         <div>
           <h4>New</h4>
           <ul>
+            <li><b>Add a repository's submodules to a view.</b> When creating or editing a view, one click adds every submodule repository of a selected repository, including nested ones if you like.</li>
             <li><b>AI chat on the Review tab.</b> Open a chat panel about the whole PR from the toolbar, and pick up any earlier conversation about that PR, whether about specific lines or the whole thing. Conversations are saved on your device.</li>
           </ul>
           <h4>Improved</h4>
@@ -68,6 +69,8 @@
           <h4>Fixed</h4>
           <ul>
             <li>AI summaries no longer come back blank when a model spends its whole budget reasoning: Nonlinear retries with more room, or tells you what happened.</li>
+            <li>PRs whose prerequisite is in a repository outside the view, and already merged, are no longer shown as “Blocked by chain”.</li>
+            <li>Repositories added to a view load their PRs right away, and grouping by repository lists the ones with no open PRs.</li>
           </ul>
         </div>
       </article>

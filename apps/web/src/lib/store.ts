@@ -112,6 +112,19 @@ export interface DiffImportMeta {
   totals: { files: number; additions: number; deletions: number };
 }
 
+/** One Ask AI conversation about a PR (kept on this device only). */
+export interface AIChat {
+  id: string;
+  prKey: string;
+  /** first question, shown in the conversation picker */
+  title: string;
+  /** what the conversation is about: specific lines, or the whole PR (path "") */
+  target: { repoKey: string; prKey: string; prTitle: string; prUrl: string; path: string; label: string; selected: string; context: string };
+  turns: { q: string; a: string; cost: number; model: string; at: number }[];
+  createdAt: number;
+  updatedAt: number;
+}
+
 /** A GitHub write held back by safe mode until the user reviews it. */
 export interface StagedWrite {
   id: string;
@@ -271,6 +284,8 @@ export const COLLECTIONS = {
   staged: { synced: false, kind: "pref" },
   /** PR keys where review start was already signalled on GitHub */
   reviewSignals: { synced: false, kind: "pref" },
+  /** Ask AI conversations, per PR (this device only) */
+  aiChats: { synced: false, kind: "pref" },
   prs: { synced: false, kind: "pref" },
   repos: { synced: false, kind: "pref" },
   summaries: { synced: false, kind: "pref" },
@@ -301,6 +316,7 @@ export interface Collections {
   intentions: Record<string, Intention>;
   staged: Record<string, StagedWrite>;
   reviewSignals: Record<string, { at: number }>;
+  aiChats: Record<string, AIChat>;
   prs: Record<string, PRSnapshot>;
   repos: Record<string, RepoInfo>;
   summaries: Record<string, SummaryRecord>;
@@ -327,7 +343,7 @@ export interface AppState extends Collections {
 
 const empty = (): Collections => ({
   views: {}, timelines: {}, releases: {}, pins: {}, cards: {}, placements: {}, notes: {}, reviews: {}, localEdges: {}, chains: {},
-  prLocal: {}, prEvents: {}, syncBase: {}, syncConflicts: {}, drafts: {}, intentions: {}, staged: {}, reviewSignals: {}, prs: {}, repos: {}, summaries: {}, ledger: {}, diffs: {}, settings: {},
+  prLocal: {}, prEvents: {}, syncBase: {}, syncConflicts: {}, drafts: {}, intentions: {}, staged: {}, reviewSignals: {}, aiChats: {}, prs: {}, repos: {}, summaries: {}, ledger: {}, diffs: {}, settings: {},
 });
 
 function recordOp(c: CollectionName, id: string, action: Op["action"], payload: unknown, deviceId: string) {

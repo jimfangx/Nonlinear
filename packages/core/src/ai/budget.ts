@@ -201,7 +201,10 @@ export function diffHash(patches: string[]): string {
 /** Sensitive-file policy (§5.2): never auto-send NDA/private code. */
 export interface RepoAIPolicy {
   repo: string;
+  /** legacy: AI used to need a per-repository opt-in; now AI applies to every repository when enabled */
   allowRemote: boolean;
+  /** exclusions are on for this repository (older policies: on when they have patterns) */
+  restrict?: boolean;
   /** glob-ish substrings excluded from prompts */
   excludePatterns: string[];
   requirePreview: boolean;

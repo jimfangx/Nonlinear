@@ -43,7 +43,7 @@
   "screenshot": "https://nonlinear.cx/screenshots/review-nav.png",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Web",
-  "softwareVersion": "0.1.15",
+  "softwareVersion": "0.1.16",
   "license": "https://opensource.org/licenses/MIT",
   "isAccessibleForFree": true,
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -75,7 +75,7 @@
 <main>
 <header class="hero">
   <div class="wrap">
-    <a class="eyebrow" href="#releases" style="text-decoration:none"><b>New in 0.1.15</b> Type any repo · Review progress in the inbox <span aria-hidden="true">→</span></a>
+    <a class="eyebrow" href="#releases" style="text-decoration:none"><b>New in 0.1.16</b> AI chat about the whole PR <span aria-hidden="true">→</span></a>
     <h1>Ship releases that span <em>dozens of repos</em>.</h1>
     <p class="lede">Nonlinear is the release workbench for maintainers whose work doesn't fit in one repository. Triage PRs, untangle cross-repo dependency chains, pin submodules and review huge diffs, all in one place.</p>
     <div class="ctas">
@@ -248,7 +248,26 @@
     <div class="notes">
 
       <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.15</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div class="rel-meta"><span class="rel-ver">0.1.16</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>AI chat on the Review tab.</b> Open a chat panel about the whole PR from the toolbar, and pick up any earlier conversation about that PR, whether about specific lines or the whole thing. Conversations are saved on your device.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>Turning on AI now covers every repository. Per-repository settings are only for keeping files out of prompts, or <code>*</code> to turn AI off for a repository.</li>
+            <li>Whole-PR summaries leave out files you've excluded from AI.</li>
+          </ul>
+          <h4>Fixed</h4>
+          <ul>
+            <li>AI summaries no longer come back blank when a model spends its whole budget reasoning: Nonlinear retries with more room, or tells you what happened.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.15</span><span class="rel-date">November 23, 2026</span></div>
         <div>
           <h4>New</h4>
           <ul>
@@ -281,21 +300,6 @@
           <ul>
             <li>When an organization blocks the app, the error explains both fixes: ask an owner to approve it, or add a fallback token.</li>
             <li>Repeat reads in those organizations reuse cached answers, so they barely touch your GitHub rate limit.</li>
-          </ul>
-        </div>
-      </article>
-
-      <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.13</span><span class="rel-date">November 23, 2026</span></div>
-        <div>
-          <h4>New</h4>
-          <ul>
-            <li><b>Private sync servers.</b> If you run your own sync service, you can limit it to specific GitHub accounts. Anyone else is refused at sign-in, and removing someone also signs them out everywhere.</li>
-          </ul>
-          <h4>Improved</h4>
-          <ul>
-            <li>A sync server that doesn't accept your account now tells you so, in the app and in the browser tab, instead of leaving sign-in waiting.</li>
-            <li>Simpler local setup for developing against the sync service.</li>
           </ul>
         </div>
       </article>

@@ -1,11 +1,12 @@
 import { createPortal } from "react-dom";
 import { NavIcon } from "./NavIcon";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useApp, useSettings } from "../lib/store";
+import { useShallow } from "zustand/react/shallow";
+import { useApp, useSettings, type AIChat } from "../lib/store";
 import { aiAllowedFor, askModel, ASK_SYSTEM, buildAskPrompt, estimate, model } from "../lib/ai";
 import { renderMarkdown } from "../lib/markdown";
 import { isDesktop, invoke } from "../lib/platform";
-import { Modal } from "./ui";
+import { Modal, timeAgo } from "./ui";
 
 export interface AskTarget {
   repoKey: string;
@@ -20,20 +21,38 @@ export interface AskTarget {
 }
 
 const SUGGESTIONS = ["What does this change do?", "Is there a bug or edge case here?", "How could this be simpler?", "What should I test?"];
+const PR_SUGGESTIONS = ["Summarize the risky parts of this PR", "What should I review first?", "What tests are missing?", "Is anything here likely to break other code?"];
 
-/** Ask a model about specific diff lines. Shows the exact prompt and estimated cost before sending. */
-export function AskAI({ target, docked, dock, onDock, onClose }: {
+const NEW = "__new";
+
+/** Conversations about this PR, most recent first. */
+export function useChats(prKey: string): AIChat[] {
+  return useApp(useShallow((s) => Object.values(s.aiChats).filter((c) => c.prKey === prKey).sort((a, b) => b.updatedAt - a.updatedAt)));
+}
+
+/**
+ * Ask a model about specific diff lines or the whole PR. Shows the exact prompt and
+ * estimated cost before sending. Conversations are saved per PR on this device and
+ * can be reopened from the picker.
+ */
+export function AskAI({ chatId, target, docked, dock, onDock, onClose, onSwitch }: {
+  chatId: string;
   target: AskTarget;
   docked: boolean;
   dock: HTMLElement | null;
   onDock: () => void;
   onClose: () => void;
+  /** open another saved conversation, or (null) start a new one about the whole PR */
+  onSwitch: (chat: AIChat | null) => void;
 }) {
   const s = useSettings();
   const toast = useApp((x) => x.toast);
   const [question, setQuestion] = useState("");
   const [modelId, setModelId] = useState(s.defaultModel);
-  const [history, setHistory] = useState<{ q: string; a: string; cost: number; model: string }[]>([]);
+  const saved = useApp((x) => x.aiChats[chatId]);
+  const history = saved?.turns ?? [];
+  const chats = useChats(target.prKey);
+  const wholePR = !target.path;
   const [pending, setPending] = useState("");
   const inFlight = useRef(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -76,7 +95,12 @@ export function AskAI({ target, docked, dock, onDock, onClose }: {
     try {
       const prompt = buildAskPrompt({ prTitle: target.prTitle, prUrl: target.prUrl, path: target.path, selected: target.selected, context: target.context, question: text, history });
       const res = await askModel({ modelId, system: ASK_SYSTEM, user: prompt, maxOut: 900, label: `${target.prKey}:${target.path}:ask` });
-      setHistory((h) => [...h, { q: text, a: res.text, cost: res.costUsd, model: m.label }]);
+      const st = useApp.getState();
+      const now = Date.now();
+      const turn = { q: text, a: res.text, cost: res.costUsd, model: m.label, at: now };
+      const cur = st.aiChats[chatId];
+      st.put("aiChats", chatId, cur ? { ...cur, turns: [...cur.turns, turn], updatedAt: now }
+        : { id: chatId, prKey: target.prKey, title: text.slice(0, 80), target, turns: [turn], createdAt: now, updatedAt: now });
     } catch (e) {
       setError((e as Error).message);
       setQuestion((current) => current || text);
@@ -85,7 +109,25 @@ export function AskAI({ target, docked, dock, onDock, onClose }: {
       setPending("");
     }
   };
-  const title = <>Ask AI · <span className="mono small">{target.path}</span> · {target.label}</>;
+  const title = wholePR ? <>Ask AI · whole PR</> : <>Ask AI · <span className="mono small">{target.path}</span> · {target.label}</>;
+  const picker = (
+    <div className="row ask-picker">
+      <select className="input grow" aria-label="Conversation" value={chatId} onChange={(e) => {
+        const v = e.target.value;
+        onSwitch(v === NEW ? null : chats.find((c) => c.id === v) ?? null);
+      }}>
+        {!saved && <option value={chatId}>New conversation{wholePR ? " · whole PR" : ` · ${target.path.split("/").pop()} ${target.label}`}</option>}
+        {chats.map((c) => (
+          <option key={c.id} value={c.id}>{c.title} · {c.target.path ? `${c.target.path.split("/").pop()} ${c.target.label}` : "whole PR"} · {timeAgo(c.updatedAt)}</option>
+        ))}
+        <option value={NEW}>+ New conversation about the whole PR</option>
+      </select>
+      {saved && <button type="button" className="btn ghost sm" aria-label="Delete this conversation" title="Delete this conversation" onClick={() => {
+        useApp.getState().remove("aiChats", chatId);
+        onSwitch(chats.find((c) => c.id !== chatId) ?? null);
+      }}><NavIcon name="trash" /></button>}
+    </div>
+  );
   const body = <div className="col ask-ai" data-keep-selection>
       <div ref={transcript} className="col ask-transcript" aria-live="polite">
         {!allowed.ok && <div className="banner warn">{allowed.reason}</div>}
@@ -97,9 +139,11 @@ export function AskAI({ target, docked, dock, onDock, onClose }: {
           <summary>MCP client configuration</summary>
           <pre className="mono small ask-selection">{JSON.stringify({ mcpServers: { nonlinear: mcp } }, null, 2)}</pre>
         </details>}
-        {docked
-          ? <details className="small"><summary>Selected diff</summary><pre className="mono small ask-selection">{target.selected.slice(0, 3000)}</pre></details>
-          : <pre className="mono small ask-selection">{target.selected.slice(0, 3000)}</pre>}
+        {wholePR
+          ? <div className="faint small">Asking about the whole PR: the model sees its changes (up to about 40,000 characters, without files excluded in Settings → AI).</div>
+          : docked
+            ? <details className="small"><summary>Selected diff</summary><pre className="mono small ask-selection">{target.selected.slice(0, 3000)}</pre></details>
+            : <pre className="mono small ask-selection">{target.selected.slice(0, 3000)}</pre>}
         {history.map((h, i) => (
           <div key={i} className="col" style={{ gap: 4 }}>
             <div className="ask-q"><b>You:</b> {h.q}</div>
@@ -109,14 +153,14 @@ export function AskAI({ target, docked, dock, onDock, onClose }: {
         ))}
         {pending && <div className="ask-q"><b>You:</b> {pending}<div className="faint small" role="status">Asking…</div></div>}
         {error && <div className="banner err" role="alert">{error}</div>}
-        {!docked && !history.length && (
+        {!history.length && !pending && (!docked || wholePR) && (
           <div className="row" style={{ flexWrap: "wrap" }}>
-            {SUGGESTIONS.map((q) => <button key={q} className="btn sm" disabled={busy || !allowed.ok} onClick={() => void send(q)}>{q}</button>)}
+            {(wholePR ? PR_SUGGESTIONS : SUGGESTIONS).map((q) => <button key={q} className="btn sm" disabled={busy || !allowed.ok} onClick={() => void send(q)}>{q}</button>)}
           </div>
         )}
       </div>
         <form className="col ask-form" onSubmit={(e) => { e.preventDefault(); void send(); }}>
-          <textarea ref={textarea} className="input" autoFocus={!docked} aria-label="Question about the selected lines" placeholder={docked ? "Ask a follow-up…" : "Ask about these lines…"} value={question}
+          <textarea ref={textarea} className="input" autoFocus={!docked} aria-label={wholePR ? "Question about this PR" : "Question about the selected lines"} placeholder={history.length ? "Ask a follow-up…" : wholePR ? "Ask about this PR…" : "Ask about these lines…"} value={question}
             onChange={(e) => setQuestion(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send(); } }} />
           <div className="row">
@@ -136,9 +180,10 @@ export function AskAI({ target, docked, dock, onDock, onClose }: {
   if (!docked) return <Modal title={title} onClose={onClose} wide>{body}</Modal>;
   return dock ? createPortal(
     <aside className="review-ask-sidebar" aria-label="Ask AI chat" data-keep-selection>
-      <div className="toolbar small"><div className="grow ellipsis" title={target.path}>{title}</div>
+      <div className="toolbar small"><div className="grow ellipsis" title={target.path || "whole PR"}>{title}</div>
         <button type="button" className="btn ghost sm" aria-label="Close AI chat" onClick={onClose}><NavIcon name="close" /></button>
       </div>
+      {picker}
       {body}
     </aside>, dock,
   ) : null;

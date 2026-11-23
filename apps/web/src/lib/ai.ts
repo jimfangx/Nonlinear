@@ -14,6 +14,7 @@ import {
   LOCAL_ADAPTERS,
   type ModelInfo,
   type ProviderId,
+  type RepoAIPolicy,
 } from "@nonlinear/core";
 import { getSecret } from "./db";
 import { invoke, isDesktop } from "./platform";
@@ -45,12 +46,23 @@ export function estimate(m: ModelInfo, system: string, user: string, maxOut = 12
   return { model: m, inputTokens, outputTokens: maxOut, usd: estimateCost(m, inputTokens, maxOut) };
 }
 
+/** Exclusions are switched on for this repository. */
+export function aiPolicyActive(pol: RepoAIPolicy | undefined): boolean {
+  return !!pol && (pol.restrict ?? pol.excludePatterns.length > 0);
+}
+
+/**
+ * With AI enabled, every repository may be used; a repository's exclusions (when
+ * switched on) keep matching files out, and "*" turns AI off for that repository.
+ */
 export function aiAllowedFor(repoKey: string, path?: string): { ok: boolean; reason?: string } {
   const s = useApp.getState().settings_();
   if (!s.aiEnabled) return { ok: false, reason: "AI is disabled. Enable it in Settings and choose a provider." };
-  const pol = s.aiPolicies.find((p) => p.repo === repoKey);
-  if (!pol || !pol.allowRemote) return { ok: false, reason: `No outbound AI policy for ${repoKey}. Allow it explicitly in Settings → AI (never automatic for private/NDA code).` };
-  if (path && isExcluded(path, pol)) return { ok: false, reason: `${path} matches an exclusion pattern for ${repoKey}.` };
+  const pol = s.aiPolicies.find((p) => p.repo.toLowerCase() === repoKey.toLowerCase());
+  if (aiPolicyActive(pol)) {
+    if (pol!.excludePatterns.includes("*")) return { ok: false, reason: `AI is turned off for ${repoKey} (exclude pattern “*” in Settings → AI).` };
+    if (path && isExcluded(path, pol)) return { ok: false, reason: `${path} matches an exclusion pattern for ${repoKey}.` };
+  }
   return { ok: true };
 }
 
@@ -91,15 +103,34 @@ async function callProvider(m: ModelInfo, system: string, user: string, maxOut: 
     }
     // OpenAI-compatible: openai, openrouter, ollama
     const base = m.provider === "openai" ? "https://api.openai.com/v1" : m.provider === "openrouter" ? "https://openrouter.ai/api/v1" : "http://localhost:11434/v1";
-    const r = await fetch(`${base}/chat/completions`, {
-      method: "POST",
-      signal: ctl.signal,
-      headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
-      body: JSON.stringify({ model: m.id, max_completion_tokens: maxOut, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j?.error?.message ?? `HTTP ${r.status}`);
-    return { text: j.choices?.[0]?.message?.content ?? "", inTok: j.usage?.prompt_tokens ?? 0, outTok: j.usage?.completion_tokens ?? 0 };
+    type Choice = { finish_reason?: string; message?: { content?: string | { type?: string; text?: string }[] | null; refusal?: string | null } };
+    const ask = async (budget: number) => {
+      const r = await fetch(`${base}/chat/completions`, {
+        method: "POST",
+        signal: ctl.signal,
+        headers: { "content-type": "application/json", ...(key ? { authorization: `Bearer ${key}` } : {}) },
+        body: JSON.stringify({ model: m.id, max_completion_tokens: budget, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
+      });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error?.message ?? `HTTP ${r.status}`);
+      const choice = (j.choices?.[0] ?? {}) as Choice;
+      const c = choice.message?.content;
+      const text = typeof c === "string" ? c : Array.isArray(c) ? c.map((p) => p.text ?? "").join("") : "";
+      return { text, choice, inTok: (j.usage?.prompt_tokens ?? 0) as number, outTok: (j.usage?.completion_tokens ?? 0) as number, reasoning: (j.usage?.completion_tokens_details?.reasoning_tokens ?? 0) as number };
+    };
+    let res = await ask(maxOut);
+    // Reasoning models can spend the whole output budget thinking and return no text: retry once with more room.
+    if (!res.text.trim() && res.choice.finish_reason === "length") {
+      const first = res;
+      res = await ask(Math.max(maxOut * 4, 4000));
+      res = { ...res, inTok: res.inTok + first.inTok, outTok: res.outTok + first.outTok };
+    }
+    if (!res.text.trim()) {
+      throw new Error(res.choice.message?.refusal ? `${m.label} declined: ${res.choice.message.refusal}`
+        : res.choice.finish_reason === "length" ? `${m.label} used its whole output budget${res.reasoning ? ` (${res.reasoning} tokens of reasoning)` : ""} and returned no text. Try a different model.`
+        : `${m.label} returned an empty answer.`);
+    }
+    return { text: res.text, inTok: res.inTok, outTok: res.outTok };
   } finally {
     clearTimeout(timer);
   }
@@ -123,7 +154,7 @@ export async function summarize(opts: {
 }): Promise<SummaryRecord> {
   const key = summaryKey({ repo: opts.repo, pr: opts.pr, baseSha: opts.baseSha, headSha: opts.headSha, diffHash: opts.diffHash, modelId: opts.modelId, promptVersion: PROMPT_VERSION, contextPolicy: "default", file: opts.file ?? undefined });
   const cached = useApp.getState().summaries[key];
-  if (cached) return cached;
+  if (cached && cached.text.trim()) return cached;
   const f = inflight.get(key);
   if (f) return f;
   const m = model(opts.modelId);
@@ -141,6 +172,7 @@ export async function summarize(opts: {
       const actual = estimateCost(m, out.inTok || est.inputTokens, out.outTok || est.outputTokens);
       l.settle(res.reservationId, actual);
       persistLedger(l);
+      if (!out.text.trim()) throw new Error(`${m.label} returned an empty summary. Try again or choose a different model.`);
       const rec: SummaryRecord = { key, prKey: opts.prKey, file: opts.file, diffHash: opts.diffHash, modelId: m.id, promptVersion: PROMPT_VERSION, text: out.text, costUsd: actual, createdAt: Date.now() };
       useApp.getState().put("summaries", key, rec);
       return rec;
@@ -184,12 +216,18 @@ export const ASK_SYSTEM = "You are helping a maintainer review a pull request. A
 
 /** Prompt for a question about specific diff lines, with bounded surrounding context. */
 export function buildAskPrompt(o: { prTitle: string; prUrl: string; path: string; selected: string; context: string; question: string; history: { q: string; a: string }[] }): string {
-  const parts = [
-    `PR: ${o.prTitle}\nGitHub PR: ${o.prUrl}\nChanges: ${o.prUrl}/files`,
-    `File: ${o.path}`,
-    "Surrounding diff context:\n```diff\n" + o.context.slice(0, 12_000) + "\n```",
-    "Selected lines:\n```diff\n" + o.selected.slice(0, 8_000) + "\n```",
-  ];
+  const parts = o.path
+    ? [
+      `PR: ${o.prTitle}\nGitHub PR: ${o.prUrl}\nChanges: ${o.prUrl}/files`,
+      `File: ${o.path}`,
+      "Surrounding diff context:\n```diff\n" + o.context.slice(0, 12_000) + "\n```",
+      "Selected lines:\n```diff\n" + o.selected.slice(0, 8_000) + "\n```",
+    ]
+    : [
+      // A conversation about the whole PR: the PR's diff (bounded) instead of a selection.
+      `PR: ${o.prTitle}\nGitHub PR: ${o.prUrl}\nChanges: ${o.prUrl}/files`,
+      "The PR's changes (may be truncated):\n```diff\n" + o.context.slice(0, 40_000) + "\n```",
+    ];
   for (const h of o.history.slice(-4)) parts.push(`Earlier question: ${h.q}\nEarlier answer: ${h.a.slice(0, 2000)}`);
   parts.push(`Question: ${o.question}`);
   return parts.join("\n\n");
@@ -197,7 +235,7 @@ export function buildAskPrompt(o: { prTitle: string; prUrl: string; path: string
 
 export function latestSummary(prKey: string, file: string | null): SummaryRecord | undefined {
   return Object.values(useApp.getState().summaries)
-    .filter((s) => s.prKey === prKey && s.file === file)
+    .filter((s) => s.prKey === prKey && s.file === file && s.text.trim())
     .sort((a, b) => b.createdAt - a.createdAt)[0];
 }
 

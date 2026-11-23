@@ -42,7 +42,7 @@ Declare `Depends-On: org/repo#123` in a PR body, or build the chain in the UI. N
 ### 🔍 Review built for big diffs
 - A frontier rail tracks exactly which hunks you've reviewed. Progress follows hunks across force-pushes, and anything that changed since you looked is marked stale.
 - Private notes and draft comments appear inline, and you can delete them in place. Drafts post as one GitHub review.
-- **Ask AI** about a line or a range of lines from the right-click menu or the toolbar. You see the exact prompt and estimated cost before anything is sent.
+- **Ask AI** about a line or a range of lines from the right-click menu or the toolbar, or open **✦ AI chat** to ask about the whole PR. Conversations are saved per PR on your device, so you can pick up any earlier one. You see the exact prompt and estimated cost before anything is sent.
 - **LGTM** approves in one click. When you start reviewing, Nonlinear requests a review from you, so others see you're on it. GitHub's pending reviews are private, so this is the only visible signal.
 - **Go to definition / find references** in any language: ⌘-click an identifier, right-click it, or select it and press F12 / ⇧F12. Results come from the PR's changes, the full changed files (parsed with tree-sitter for Scala, Python, Rust, TypeScript/JavaScript, C, C++ and Java; per-language text rules for Go, Verilog/SystemVerilog, VHDL, Kotlin, Swift, shell and others), the rest of the repository (`git grep` at the PR head on desktop, GitHub code search on the web), and **any LSP server** you configure (clangd, Metals, pyright, rust-analyzer, gopls…), whose results are marked confirmed.
 - **⌘F searches the code** once you've clicked in the diff, built for files with hundreds of thousands of lines. Match case, whole word, regex, and an all-changed-files mode with per-file counts.
@@ -77,7 +77,7 @@ A lane graph with refs, PRs and the submodule pins at each commit, plus commit d
 <img src="site/screenshots/graph.png" alt="Git Graph with a selected commit and its submodule pins" width="100%">
 
 ### ✨ Optional AI
-Bring your own API key, or use a local **Claude Code** or **Codex CLI** install. You see every prompt before it's sent, policies are set per repo, and a hard budget cap stops spending. On desktop you can also share a review selection with your local MCP clients for 30 minutes.
+Bring your own API key, or use a local **Claude Code** or **Codex CLI** install. Turning AI on covers every repository, with optional per-repository exclusions to keep files out of prompts. You see every prompt before it's sent, and a hard budget cap stops spending. On desktop you can also share a review selection with your local MCP clients for 30 minutes.
 
 ### 🎨 Also included
 - Seven color themes or your own custom color, light or dark mode, and an optional background image with a darkness mask.
@@ -92,7 +92,7 @@ Bring your own API key, or use a local **Claude Code** or **Codex CLI** install.
 ## Install
 
 ### macOS app
-Download the latest `.dmg` (currently **0.1.15**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
+Download the latest `.dmg` (currently **0.1.16**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
 
 > Current builds are Apple Silicon only and ad-hoc signed. The first time you open the app, right-click it and choose **Open**.
 

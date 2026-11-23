@@ -8,7 +8,7 @@ import { BACKGROUND_BLOB, COLOR_THEMES } from "../lib/theme";
 import { githubApi, githubAvatarUrl, resetClient, describeError, freshCapabilities, enrichPR, updatePRFields, writeChainBlock, FALLBACK_TOKEN_SECRET, oauthRestrictedOrgs } from "../lib/github";
 import { resolveConflict, syncOnce } from "../lib/sync";
 import { cloudUrl, connect, currentState, disconnect, recoveryKey, requestPairing, resetEncryption, applyRecoveryKey, DEFAULT_CLOUD_URL, type CloudState } from "../lib/cloud";
-import { PROVIDERS } from "../lib/ai";
+import { PROVIDERS, aiPolicyActive } from "../lib/ai";
 import { isDesktop, desktop } from "../lib/platform";
 import { download, timeAgo, Modal } from "../components/ui";
 
@@ -357,13 +357,13 @@ function AISection() {
   const month = monthOf(Date.now());
   const repos = [...new Set(Object.values(views).flatMap((v) => v.repos))].sort();
   const setPolicy = (repo: string, p: Partial<RepoAIPolicy>) => {
-    const cur = s.aiPolicies.find((x) => x.repo === repo) ?? { repo, allowRemote: false, excludePatterns: [], requirePreview: true };
+    const cur = s.aiPolicies.find((x) => x.repo === repo) ?? { repo, allowRemote: true, excludePatterns: [], requirePreview: true };
     set({ aiPolicies: [...s.aiPolicies.filter((x) => x.repo !== repo), { ...cur, ...p }] });
   };
   return (
     <Section title="AI summaries">
       <label className="row">
-        <input type="checkbox" checked={s.aiEnabled} onChange={(e) => set({ aiEnabled: e.target.checked })} /> Enable AI features (off by default; nothing is sent without per-repository permission and a preview)
+        <input type="checkbox" checked={s.aiEnabled} onChange={(e) => set({ aiEnabled: e.target.checked })} /> Enable AI features (off by default). When on, AI can be used on every repository; you see the exact prompt and its cost before anything is sent.
       </label>
       <h3 className="h3">Provider keys (stored locally, never synced)</h3>
       {PROVIDERS.map((p) => (
@@ -432,15 +432,17 @@ function AISection() {
           </div>
         );
       })}
-      <h3 className="h3">Per-repository outbound policy</h3>
+      <h3 className="h3">Per-repository exclusions (optional)</h3>
+      <div className="faint small">Tick a repository to keep matching files out of every AI prompt. Use <code>*</code> to turn AI off for that repository entirely.</div>
       {repos.map((r) => {
         const p = s.aiPolicies.find((x) => x.repo === r);
+        const active = aiPolicyActive(p);
         return (
           <div key={r} className="row small">
             <label className="row" style={{ width: 300 }}>
-              <input type="checkbox" checked={!!p?.allowRemote} onChange={(e) => setPolicy(r, { allowRemote: e.target.checked })} /> {r}
+              <input type="checkbox" checked={active} onChange={(e) => setPolicy(r, { restrict: e.target.checked })} aria-label={`Exclude files from AI in ${r}`} /> {r}
             </label>
-            <input aria-label={`${r} AI exclude patterns`} className="input grow" placeholder="exclude patterns, e.g. *.secret, vendor/*" value={p?.excludePatterns.join(", ") ?? ""} onChange={(e) => setPolicy(r, { excludePatterns: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
+            <input aria-label={`${r} AI exclude patterns`} className="input grow" disabled={!active} placeholder={active ? "e.g. *.secret, vendor/*, or * for the whole repository" : "Tick to exclude files"} value={p?.excludePatterns.join(", ") ?? ""} onChange={(e) => setPolicy(r, { excludePatterns: e.target.value.split(",").map((x) => x.trim()).filter(Boolean) })} />
           </div>
         );
       })}

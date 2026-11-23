@@ -1,4 +1,4 @@
-import { AskAI, type AskTarget } from "../components/AskAI";
+import { AskAI, useChats, type AskTarget } from "../components/AskAI";
 import { DiffCodeLayoutSelect, useDiffCodeLayout } from "../components/FileDiff";
 import { CommitDiff } from "../components/CommitDiff";
 import { NavIcon } from "../components/NavIcon";
@@ -23,7 +23,7 @@ import {
   type RawReview,
   type RawReviewComment,
 } from "@nonlinear/core";
-import { useApp, useSettings } from "../lib/store";
+import { useApp, useSettings, type AIChat } from "../lib/store";
 import { describeError, deferredNotice, enrichPR, githubApi, guardedWrite, WriteBlocked, cachedCapabilities, signalReviewStart, submitLGTM } from "../lib/github";
 import { loadPRDiff, remapIfHeadChanged, fileSectionOf, loadReviewCommits, loadReviewCommitDiff, loadPRConversation, type LoadedDiff } from "../lib/review";
 import { aiAllowedFor, estimate, latestSummary, model, summarize } from "../lib/ai";
@@ -149,17 +149,37 @@ export function ReviewPR() {
   const [diff, setDiff] = useState<LoadedDiff | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [commentRevision, setCommentRevision] = useState(0);
-  const [ask, setAsk] = useState<{ target: AskTarget; id: number } | null>(null);
+  const [ask, setAsk] = useState<{ target: AskTarget; id: number; chatId: string } | null>(null);
   const [askDocked, setAskDocked] = useState(false);
   const [askVisible, setAskVisible] = useState(false);
   const [askDock, setAskDock] = useState<HTMLDivElement | null>(null);
+  const chats = useChats(key);
   const openAsk = (target: AskTarget) => {
     setAsk((current) => {
       if (current && current.target.path === target.path && current.target.selected === target.selected && current.target.context === target.context) return current;
-      return { target, id: (current?.id ?? 0) + 1 };
+      return { target, id: (current?.id ?? 0) + 1, chatId: newId("chat") };
     });
     if (!ask || ask.target.path !== target.path || ask.target.selected !== target.selected || ask.target.context !== target.context) setAskDocked(false);
     setAskVisible(true);
+  };
+  /** A conversation about the whole PR: its diff (bounded), without files excluded from AI. */
+  const wholePRTarget = (): AskTarget | null => {
+    if (!pr) return null;
+    const repoKey = `${pr.owner}/${pr.repo}`.toLowerCase();
+    const context = diff ? diff.index.files.filter((f) => !f.binary && aiAllowedFor(repoKey, f.path).ok).map((f) => fileSectionOf(diff, f)).join("\n").slice(0, 40_000) : "";
+    return { repoKey, prKey: key, prTitle: pr.title, prUrl: pr.url, path: "", label: "whole PR", selected: "", context };
+  };
+  const openChat = (chat: AIChat | null) => {
+    const target = chat?.target ?? wholePRTarget();
+    if (!target) return;
+    setAsk((current) => ({ target, id: (current?.id ?? 0) + 1, chatId: chat?.id ?? newId("chat") }));
+    setAskDocked(true);
+    setAskVisible(true);
+  };
+  /** Toolbar button: show/hide the docked chat; first time, open the latest conversation (or a new whole-PR one). */
+  const toggleChat = () => {
+    if (ask && askDocked) { setAskVisible(!askVisible); return; }
+    openChat(chats[0] ?? null);
   };
   const [remapInfo, setRemapInfo] = useState<string | null>(null);
   const location = useLocation();
@@ -261,7 +281,10 @@ export function ReviewPR() {
         <button className="btn sm" onClick={() => nav(`/review/${owner}/${repo}/${number}/conversation`)}>PR comment</button>
         <LGTMButton pr={pr} />
         <SubmitReviewButton pr={pr} onSubmitted={() => setCommentRevision(Date.now())} />
-        {ask && askDocked && <button className="btn sm" aria-pressed={askVisible} onClick={() => setAskVisible(!askVisible)}>AI chat</button>}
+        <button className="btn sm" aria-pressed={!!ask && askDocked && askVisible} onClick={toggleChat}
+          title={chats.length ? `AI chat · ${chats.length} saved conversation${chats.length > 1 ? "s" : ""} for this PR` : "AI chat about this PR"}>
+          ✦ AI chat{chats.length ? ` (${chats.length})` : ""}
+        </button>
         <a className="btn sm" href={pr.url} target="_blank" rel="noreferrer">
           GitHub ↗
         </a>
@@ -296,7 +319,7 @@ export function ReviewPR() {
           <div ref={setAskDock} className="review-ask-dock" />
         </Split>
       </div>
-      {ask && <AskAI key={ask.id} target={ask.target} docked={askDocked} dock={askDock}
+      {ask && <AskAI key={ask.id} chatId={ask.chatId} target={ask.target} docked={askDocked} dock={askDock} onSwitch={openChat}
         onDock={() => { setAskDocked(true); setAskVisible(true); }}
         onClose={() => { if (askDocked) setAskVisible(false); else setAsk(null); }} />}
     </div>
@@ -448,7 +471,9 @@ function AISummary({ pr, diff }: { pr: PRSnapshot; diff: LoadedDiff | null }) {
     if (!diff) return null;
     const files = diff.index.files.map((f) => {
       const fs = latestSummary(pr.key, f.path);
-      return { path: f.path, additions: f.additions, deletions: f.deletions, patch: f.generated ? undefined : fileSectionOf(diff, f), summary: fs?.text.split("\n")[0] };
+      // Files matching this repository's AI exclusions never go into the prompt.
+      const excluded = !aiAllowedFor(repoKey, f.path).ok;
+      return { path: f.path, additions: f.additions, deletions: f.deletions, patch: f.generated || excluded ? undefined : fileSectionOf(diff, f), summary: excluded ? undefined : fs?.text.split("\n")[0] };
     });
     return buildOverviewPrompt({ url: pr.url, title: pr.title, body: pr.body ?? "", files, maxPatchChars: 60_000 });
   };

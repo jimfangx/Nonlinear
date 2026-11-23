@@ -614,3 +614,5 @@ html.has-bg .panel, html.has-bg .toolbar, html.has-bg .tabs { background: color-
 .symbol-row .chip { flex: none; }
 .review-file-list-head > span:first-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .cached-entry-status { padding: 4px 8px; }
+.ask-picker { padding: 4px 8px; gap: 6px; border-bottom: 1px solid var(--border); }
+.ask-picker select { min-width: 0; }

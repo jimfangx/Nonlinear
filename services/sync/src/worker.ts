@@ -15,6 +15,8 @@ export interface Env {
   GITHUB_CLIENT_SECRET: string;
   TOKEN_KEY: string;
   ALLOWED_ORIGINS: string;
+  /** Comma-separated GitHub logins allowed to sign in. Empty or unset: any GitHub account. */
+  ALLOWED_USERS?: string;
   /** test hook */
   GITHUB_API?: string;
   GITHUB_WEB?: string;
@@ -67,6 +69,11 @@ async function open(env: Env, sealed: string): Promise<string> {
 function origins(env: Env): string[] {
   return env.ALLOWED_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean);
 }
+/** Is this GitHub login allowed on this server? (ALLOWED_USERS; empty = everyone) */
+export function userAllowed(env: Env, login: string | null | undefined): boolean {
+  const list = (env.ALLOWED_USERS ?? "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  return list.length === 0 || (!!login && list.includes(login.toLowerCase()));
+}
 function cors(env: Env, req: Request): Record<string, string> {
   const o = req.headers.get("origin");
   if (!o || !origins(env).includes(o)) return {};
@@ -113,8 +120,10 @@ async function session(env: Env, req: Request): Promise<Session | null> {
     secret = cookie;
   }
   if (!secret) return null;
-  const row = await env.DB.prepare("SELECT user_id, token_ct, scopes, expires_at FROM sessions WHERE id_hash = ?").bind(await sha256(secret)).first<{ user_id: number; token_ct: string; scopes: string; expires_at: number }>();
+  const row = await env.DB.prepare("SELECT s.user_id, s.token_ct, s.scopes, s.expires_at, u.login FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?").bind(await sha256(secret)).first<{ user_id: number; token_ct: string; scopes: string; expires_at: number; login: string }>();
   if (!row || row.expires_at < Date.now()) return null;
+  // Removing someone from ALLOWED_USERS cuts off their existing sessions too.
+  if (!userAllowed(env, row.login)) return null;
   return { userId: row.user_id, token: await open(env, row.token_ct), scopes: row.scopes };
 }
 
@@ -159,6 +168,19 @@ async function authCallback(env: Env, req: Request, url: URL): Promise<Response>
   if (granted.some((s) => s === "repo" || s.startsWith("admin"))) return json(env, req, 400, { error: "Refusing over-scoped token" });
 
   const me = (await (await fetch(`${env.GITHUB_API ?? "https://api.github.com"}/user`, { headers: { authorization: `Bearer ${tok.access_token}`, "user-agent": "nonlinear-sync", accept: "application/vnd.github+json" } })).json()) as { id: number; login: string };
+  if (!userAllowed(env, me.login)) {
+    // Not on this server's list: drop the GitHub grant (best effort) and tell the app, without creating a session.
+    await fetch(`${env.GITHUB_API ?? "https://api.github.com"}/applications/${env.GITHUB_CLIENT_ID}/grant`, {
+      method: "DELETE",
+      headers: { authorization: `Basic ${btoa(`${env.GITHUB_CLIENT_ID}:${env.GITHUB_CLIENT_SECRET}`)}`, "content-type": "application/json", "user-agent": "nonlinear-sync" },
+      body: JSON.stringify({ access_token: tok.access_token }),
+    }).catch(() => undefined);
+    const back = new URL(st.return_url);
+    back.searchParams.set("nl_error", "not_allowed");
+    back.searchParams.set("nl_login", String(me.login ?? ""));
+    if (st.client_state) back.searchParams.set("client_state", st.client_state);
+    return Response.redirect(back.toString(), 302);
+  }
   await env.DB.prepare("INSERT INTO users (id, login, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET login = excluded.login").bind(me.id, me.login, Date.now()).run();
 
   const secret = randomToken();

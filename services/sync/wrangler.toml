@@ -2,16 +2,25 @@ name = "nonlinear-sync"
 main = "src/worker.ts"
 compatibility_date = "2026-11-01"
 
+# Serve only on the custom domain (e.g. sync.nonlinear.cx, added under the Worker's Domains & Routes).
+# Self-hosting without a custom domain? Set workers_dev = true, or the Worker has no public address.
+workers_dev = false
+# No per-version preview URLs (they would expose extra copies of the service).
+preview_urls = false
+
 [[d1_databases]]
 binding = "DB"
 database_name = "nonlinear"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "543ffea1-2f51-4b1d-8c4d-6504bdb56866"
 migrations_dir = "migrations"
 
 [vars]
 # Comma-separated origins allowed to start OAuth / receive redirects and call the API.
-ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:4173,tauri://localhost"
-GITHUB_CLIENT_ID = "REPLACE_WITH_OAUTH_APP_CLIENT_ID"
+# ALLOWED_ORIGINS = "http://localhost:5173,http://localhost:4173,tauri://localhost" # local dev
+ALLOWED_ORIGINS = "tauri://localhost"
+# Comma-separated GitHub logins allowed to sign in (case-insensitive). Leave empty to allow any GitHub account.
+ALLOWED_USERS = "jimfangx"
+GITHUB_CLIENT_ID = "Ov23lihS3SHW2W7cAdlZ"
 
 # Secrets (set with `wrangler secret put`):
 #   GITHUB_CLIENT_SECRET  — OAuth App client secret (never shipped in the app)

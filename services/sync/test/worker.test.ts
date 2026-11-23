@@ -150,3 +150,43 @@ describe("desktop loopback + PKCE", () => {
     expect(((await ok.json()) as { login: string }).login).toBe("desk");
   });
 });
+
+describe("ALLOWED_USERS", () => {
+  it("allows everyone when unset, and only listed logins when set (case-insensitive)", async () => {
+    await login(); // unset → "maintainer" may sign in
+    env.ALLOWED_USERS = "someone-else, Maintainer";
+    await login(); // listed (different case)
+  });
+
+  it("refuses unlisted accounts without creating a session, and revokes the grant", async () => {
+    env.ALLOWED_USERS = "jimfangx";
+    const start = await call(`/auth/github/start?scope=public_repo&return=${encodeURIComponent(APP + "/")}&client_state=s1`);
+    const state = new URL(start.headers.get("location")!).searchParams.get("state")!;
+    const calls: string[] = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const u = String(input instanceof Request ? input.url : input);
+      calls.push(`${init?.method ?? "GET"} ${u}`);
+      if (u.endsWith("/login/oauth/access_token")) return new Response(JSON.stringify({ access_token: "gho_real", scope: "public_repo" }));
+      if (u.endsWith("/user")) return new Response(JSON.stringify({ id: 42, login: "maintainer" }));
+      return new Response(null, { status: 204 });
+    });
+    const cb = await call(`/auth/github/callback?code=abc&state=${state}`);
+    expect(cb.status).toBe(302);
+    const loc = new URL(cb.headers.get("location")!);
+    expect(loc.searchParams.get("nl_error")).toBe("not_allowed");
+    expect(loc.searchParams.get("nl_login")).toBe("maintainer");
+    expect(loc.searchParams.get("client_state")).toBe("s1");
+    expect(loc.searchParams.get("nl_code")).toBeNull();
+    expect(cb.headers.get("set-cookie")).toBeNull();
+    expect(calls.some((c) => c.startsWith("DELETE") && c.endsWith("/applications/cid/grant"))).toBe(true);
+  });
+
+  it("cuts off existing sessions when a user is removed from the list", async () => {
+    const session = await login();
+    const ok = await call("/gh/user", { headers: { authorization: `Bearer ${session}` } });
+    expect(ok.status).toBe(200);
+    env.ALLOWED_USERS = "jimfangx";
+    const denied = await call("/gh/user", { headers: { authorization: `Bearer ${session}` } });
+    expect(denied.status).toBe(401);
+  });
+});

@@ -31,7 +31,11 @@ impl Loopback {
                         let _ = BufReader::new(&stream).read_line(&mut line);
                         let target = line.split_whitespace().nth(1).unwrap_or("").to_string();
                         let (status, body, res) = if let Some(q) = target.strip_prefix("/cb?") {
-                            ("200 OK", "<h3>Nonlinear: signed in.</h3><p>You can close this tab and return to the app.</p>", Ok(q.to_string()))
+                            if q.split('&').any(|kv| kv.starts_with("nl_error=")) {
+                                ("200 OK", "<h3>Nonlinear: sign-in refused.</h3><p>This sync server doesn't accept your GitHub account. Return to the app for details.</p>", Ok(q.to_string()))
+                            } else {
+                                ("200 OK", "<h3>Nonlinear: signed in.</h3><p>You can close this tab and return to the app.</p>", Ok(q.to_string()))
+                            }
                         } else {
                             ("404 Not Found", "Not found", Err(String::new()))
                         };

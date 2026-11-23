@@ -82,6 +82,7 @@ export async function connect(withWrites: boolean): Promise<CloudState | null> {
     if (q) {
       const p = new URLSearchParams(q);
       if (p.get("client_state") !== clientState) throw new Error("Sign-in response did not match this request.");
+      if (p.get("nl_error")) throw new Error(signInError(p));
       return finishSession(p.get("nl_code") ?? "", verifier);
     }
     await new Promise((r) => setTimeout(r, 500));
@@ -92,10 +93,22 @@ export async function connect(withWrites: boolean): Promise<CloudState | null> {
 /** Step 2 (web, on return): exchange the one-time code, then set up encryption. */
 export async function completeConnectFromUrl(): Promise<CloudState | null> {
   const params = new URLSearchParams(location.search);
+  if (params.get("nl_error")) {
+    history.replaceState(null, "", location.pathname + location.hash);
+    throw new Error(signInError(params));
+  }
   const code = params.get("nl_code");
   if (!code) return null;
   history.replaceState(null, "", location.pathname + location.hash);
   return finishSession(code);
+}
+
+function signInError(p: URLSearchParams): string {
+  if (p.get("nl_error") === "not_allowed") {
+    const who = p.get("nl_login");
+    return `This sync server only accepts specific GitHub accounts${who ? `, and @${who} isn't one of them` : ""}. Ask its operator to add you, or deploy your own (see the README).`;
+  }
+  return `Sign-in failed: ${p.get("nl_error")}`;
 }
 
 async function finishSession(code: string, verifier?: string): Promise<CloudState> {

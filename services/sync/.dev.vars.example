@@ -1,0 +1,18 @@
+# Local settings for `npm run dev` (wrangler dev on http://localhost:8787).
+# Copy to .dev.vars (git-ignored). Values here override [vars] in wrangler.toml, locally only.
+
+# Encrypts stored GitHub tokens in the local database: openssl rand -base64 32
+TOKEN_KEY=
+
+# Option 1 (default): fully offline, against the mock GitHub — run `node scripts/mock-github.mjs 4010` first.
+GITHUB_API=http://localhost:4010
+GITHUB_WEB=http://localhost:4010
+GITHUB_CLIENT_SECRET=mock
+# The mock signs everyone in as "maintainer"; empty = any account.
+ALLOWED_USERS=
+
+# Option 2: real GitHub. Create a separate OAuth App for development with the callback
+# http://localhost:8787/auth/github/callback, then comment out Option 1 and set:
+# GITHUB_CLIENT_ID=
+# GITHUB_CLIENT_SECRET=
+# ALLOWED_USERS=your-github-login

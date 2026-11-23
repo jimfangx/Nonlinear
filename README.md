@@ -92,7 +92,7 @@ Bring your own API key, or use a local **Claude Code** or **Codex CLI** install.
 ## Install
 
 ### macOS app
-Download the latest `.dmg` (currently **0.1.12**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
+Download the latest `.dmg` (currently **0.1.13**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
 
 > Current builds are Apple Silicon only and ad-hoc signed. The first time you open the app, right-click it and choose **Open**.
 
@@ -129,7 +129,7 @@ npx wrangler secret put TOKEN_KEY             # base64 of 32 random bytes
 npx wrangler deploy
 ```
 
-Build the app with `VITE_NONLINEAR_CLOUD_URL=https://<worker>` so users get the one-click **Connect** button. If the Worker isn't on `*.workers.dev`, add its origin to the CSP in `apps/web/index.html` and to `ALLOWED_ORIGINS`.
+There is no shared Nonlinear Cloud: each team deploys its own Worker. Set `ALLOWED_USERS` in `wrangler.toml` to the GitHub logins allowed to sign in (comma-separated); leave it empty to accept any GitHub account. Removing a login also ends that person's existing sessions. Users enter its URL under **Settings → Nonlinear Cloud → Advanced**, or you can build the app with `VITE_NONLINEAR_CLOUD_URL=https://<worker>` so your users get a one-click **Connect** button. If the Worker isn't on `*.workers.dev`, add its origin to the CSP in `apps/web/index.html` and `apps/desktop/src-tauri/tauri.conf.json`. Users can also enter a service URL under **Settings → Nonlinear Cloud → Advanced**.
 
 ## Development
 
@@ -149,16 +149,40 @@ npm run desktop    # Tauri desktop app (needs a Rust toolchain)
 | `site` | Marketing website (static, deployed to Cloudflare Pages) and the screenshots used here |
 | `scripts` | Mock GitHub, end-to-end journeys, accessibility audits, packaging |
 
-Architecture, test suites and handoff notes are in [`IMPLEMENTATION_NOTES.md`](IMPLEMENTATION_NOTES.md). The full design spec is in [`design/`](design/).
+Architecture, test suites and handoff notes are in [`design/IMPLEMENTATION_NOTES.md`](design/IMPLEMENTATION_NOTES.md). The full design spec is in [`design/`](design/).
 
-**Building the macOS installer:**
+### Running the sync service locally
+
+Sync, sign-in and device pairing can run entirely on your machine against a mock GitHub, so nothing touches real accounts or the deployed service.
+
+**One-time setup:** copy the local settings template and give it an encryption key, then create the local database tables:
+```sh
+cp services/sync/.dev.vars.example services/sync/.dev.vars    # git-ignored
+# set TOKEN_KEY in services/sync/.dev.vars to the output of: openssl rand -base64 32
+cd services/sync && npx wrangler d1 migrations apply nonlinear --local
+```
+
+**Each session**, in three terminals:
+```sh
+node scripts/mock-github.mjs 4010      # 1. mock GitHub API + sign-in on :4010
+cd services/sync && npm run dev        # 2. sync Worker on http://localhost:8787
+npm run dev                            # 3. web app on http://localhost:5173
+```
+Then in the app open **Settings → Nonlinear Cloud → Advanced**, enter `http://localhost:8787` as the service URL, and click **Connect with GitHub**. The mock signs you in as `maintainer`.
+
+To sign in with real GitHub accounts locally instead, create a separate OAuth App with the callback `http://localhost:8787/auth/github/callback` and switch to option 2 in `.dev.vars`.
+
+### Building the macOS installer
+
 ```sh
 npm ci
 APPLE_SIGNING_IDENTITY=- npm run build -w @nonlinear/desktop -- --bundles app
 scripts/make-dmg.sh
 ```
 
-**Deploying the website:** `site/` is plain static files (no build step) served by Cloudflare Pages; `site/_headers` sets security and cache headers.
+### Deploying the website
+
+`site/` is plain static files (no build step) served by Cloudflare Pages; `site/_headers` sets security and cache headers.
 ```sh
 npx wrangler pages deploy site --project-name nonlinear-site
 ```

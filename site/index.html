@@ -43,7 +43,7 @@
   "screenshot": "https://nonlinear.cx/screenshots/review-nav.png",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Web",
-  "softwareVersion": "0.1.12",
+  "softwareVersion": "0.1.13",
   "license": "https://opensource.org/licenses/MIT",
   "isAccessibleForFree": true,
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -281,7 +281,7 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
 <main>
 <header class="hero">
   <div class="wrap">
-    <a class="eyebrow" href="#releases" style="text-decoration:none"><b>New in 0.1.12</b> Go to definition · Find in code · Folder tree <span aria-hidden="true">→</span></a>
+    <a class="eyebrow" href="#releases" style="text-decoration:none"><b>New in 0.1.13</b> Private sync servers · <b>0.1.12</b> Go to definition, find in code <span aria-hidden="true">→</span></a>
     <h1>Ship releases that span <em>dozens of repos</em>.</h1>
     <p class="lede">Nonlinear is the release workbench for maintainers whose work doesn't fit in one repository. Triage PRs, untangle cross-repo dependency chains, pin submodules and review huge diffs, all in one place.</p>
     <div class="ctas">
@@ -454,7 +454,22 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
     <div class="notes">
 
       <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.12</span><span class="rel-date">November 22, 2026</span><span class="rel-tag">Latest</span></div>
+        <div class="rel-meta"><span class="rel-ver">0.1.13</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Private sync servers.</b> If you run your own sync service, you can limit it to specific GitHub accounts. Anyone else is refused at sign-in, and removing someone also signs them out everywhere.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>A sync server that doesn't accept your account now tells you so, in the app and in the browser tab, instead of leaving sign-in waiting.</li>
+            <li>Simpler local setup for developing against the sync service.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.12</span><span class="rel-date">November 22, 2026</span></div>
         <div>
           <h4>New</h4>
           <ul>
@@ -547,7 +562,7 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
       <div><h4>🔐 End-to-end-encrypted sync</h4><p>Data is encrypted with AES-GCM before it's uploaded. New devices pair by approval with a matching 6-digit code, or with a recovery key.</p></div>
       <div><h4>🪪 Minimal GitHub scope</h4><p>OAuth only asks for <code>public_repo</code>, and over-scoped tokens are refused. In the browser, your token never reaches the page.</p></div>
       <div><h4>✋ Nothing sent without you</h4><p>Chain blocks, labels, reviews and PRs are all previewed and need your confirmation. Safe mode stages every write for review, and offline writes wait in a queue.</p></div>
-      <div><h4>🏠 Self-hostable</h4><p>The sync service is a single Cloudflare Worker backed by D1. You can deploy your own in about five commands.</p></div>
+      <div><h4>🏠 Self-hostable</h4><p>There's no shared server: your team runs its own sync service, a single Cloudflare Worker backed by D1, and decides exactly which GitHub accounts may use it.</p></div>
     </div>
   </div>
 </section>

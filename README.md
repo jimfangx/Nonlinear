@@ -118,18 +118,31 @@ You can also use Nonlinear without signing in to browse public repositories, but
 
 ## Self-hosting Nonlinear Cloud
 
-The sync service is a single Cloudflare Worker backed by D1.
+There is no shared Nonlinear Cloud: each team runs its own sync service, a single Cloudflare Worker backed by D1.
 
-```sh
-cd services/sync
-npx wrangler d1 create nonlinear              # put the id into wrangler.toml
-npx wrangler d1 migrations apply nonlinear --remote
-npx wrangler secret put GITHUB_CLIENT_SECRET  # GitHub OAuth App, callback: https://<worker>/auth/github/callback
-npx wrangler secret put TOKEN_KEY             # base64 of 32 random bytes
-npx wrangler deploy
-```
+1. **Create a GitHub OAuth App** (GitHub → Settings → Developer settings → OAuth Apps). Set the callback URL to `https://<your-worker-host>/auth/github/callback`; you can create it with a placeholder and fix the URL after deploying. Copy the Client ID and generate a client secret.
+2. **Create the database:**
+   ```sh
+   cd services/sync
+   npx wrangler login
+   npx wrangler d1 create nonlinear
+   ```
+3. **Edit `services/sync/wrangler.toml`:**
+   - `database_id`: the ID printed by `d1 create`
+   - `GITHUB_CLIENT_ID`: from step 1
+   - `ALLOWED_USERS`: GitHub logins allowed to sign in, comma-separated (empty accepts any account; removing a login also ends that person's sessions)
+   - `ALLOWED_ORIGINS`: keep `tauri://localhost` for the desktop app; add your web app's origin if you host one
+   - `workers_dev`: set to `true` unless you'll attach a custom domain (otherwise the Worker has no public address)
+4. **Create the tables, add the secrets and deploy:**
+   ```sh
+   npx wrangler d1 migrations apply nonlinear --remote
+   npx wrangler secret put GITHUB_CLIENT_SECRET   # from step 1
+   npx wrangler secret put TOKEN_KEY              # output of: openssl rand -base64 32
+   npx wrangler deploy
+   ```
+5. **Point the app at it.** Users enter the Worker's URL under **Settings → Nonlinear Cloud → Advanced**. Or build the app with `VITE_NONLINEAR_CLOUD_URL=https://<worker>` so your users get a one-click **Connect** button.
 
-There is no shared Nonlinear Cloud: each team deploys its own Worker. Set `ALLOWED_USERS` in `wrangler.toml` to the GitHub logins allowed to sign in (comma-separated); leave it empty to accept any GitHub account. Removing a login also ends that person's existing sessions. Users enter its URL under **Settings → Nonlinear Cloud → Advanced**, or you can build the app with `VITE_NONLINEAR_CLOUD_URL=https://<worker>` so your users get a one-click **Connect** button. If the Worker isn't on `*.workers.dev`, add its origin to the CSP in `apps/web/index.html` and `apps/desktop/src-tauri/tauri.conf.json`. Users can also enter a service URL under **Settings → Nonlinear Cloud → Advanced**.
+The app only allows sync servers on `*.workers.dev` and the domains listed in its security policy. For a custom domain, add its origin to the CSP in `apps/web/index.html` and `apps/desktop/src-tauri/tauri.conf.json` and rebuild.
 
 ## Development
 

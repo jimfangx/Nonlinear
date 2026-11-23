@@ -6,6 +6,7 @@
 import {
   GitHubClient,
   GitHubError,
+  type RateLimit,
   capabilities,
   fnv1a,
   newId,
@@ -42,18 +43,66 @@ export function storeSnapshots(snaps: PRSnapshot[]): void {
   if (evs.length) st.putMany("prEvents", evs);
 }
 
+/** Personal access token used only for organizations that block the OAuth app (secret name). */
+export const FALLBACK_TOKEN_SECRET = "github-pat-fallback";
+const DIRECT_API = "https://api.github.com";
+/** Organizations (lower-case) that refused the OAuth app this session; their calls go straight to the fallback token. */
+export const oauthRestrictedOrgs = new Set<string>();
+let clientFallback: string | null | undefined;
+
+/** Repository owner a REST path refers to, if any. */
+function ownerOfPath(path: string): string | null {
+  const m = /^\/(?:repos|orgs)\/([^/?#]+)/.exec(path);
+  return m ? decodeURIComponent(m[1]!).toLowerCase() : null;
+}
+
+/**
+ * Route calls for organizations that refuse the OAuth app ("org-restricted") to a
+ * second client (personal access token). The first refusal per organization is
+ * retried and remembered; later calls for it go straight to the fallback.
+ */
+export function withOrgFallback(primary: GitHubClient, direct: GitHubClient, restricted: Set<string>, onRestricted: (owner: string) => void): GitHubClient {
+  const viaPrimary = primary.request.bind(primary);
+  const textViaPrimary = primary.requestText.bind(primary);
+  const retry = async <T,>(path: string, first: () => Promise<T>, second: () => Promise<T>): Promise<T> => {
+    const owner = ownerOfPath(path);
+    if (owner && restricted.has(owner)) return second();
+    try {
+      return await first();
+    } catch (e) {
+      if (!(e instanceof GitHubError) || e.kind !== "org-restricted") throw e;
+      if (owner && !restricted.has(owner)) {
+        restricted.add(owner);
+        onRestricted(owner);
+      }
+      return second();
+    }
+  };
+  primary.request = <T,>(method: string, path: string, body?: unknown, headers?: Record<string, string>) =>
+    retry<T>(path, () => viaPrimary<T>(method, path, body, headers), () => direct.request<T>(method, path, body, headers));
+  primary.requestText = (path: string, accept: string) =>
+    retry(path, () => textViaPrimary(path, accept), () => direct.requestText(path, accept));
+  return primary;
+}
+
 export async function githubApi(): Promise<GitHubClient> {
   const s = useApp.getState().settings_();
   const token = s.authMode === "anonymous" ? null : ((await getSecret("github-token")) ?? null);
-  if (!client || token !== clientToken || client.baseUrl !== s.apiBase) {
+  // Signed in through a sync server (OAuth): an optional personal access token covers organizations that block the OAuth app.
+  const viaOAuth = s.authMode === "oauth";
+  const fallback = viaOAuth ? ((await getSecret(FALLBACK_TOKEN_SECRET)) ?? null) : null;
+  if (!client || token !== clientToken || fallback !== clientFallback || client.baseUrl !== s.apiBase) {
     clientToken = token;
-    client = new GitHubClient({
-      token,
-      baseUrl: s.apiBase || "https://api.github.com",
-      publicOnly: s.publicOnly,
-      cache: etagCache,
-      onRateLimit: (r) => useApp.setState({ rateLimit: r }),
-    });
+    clientFallback = fallback;
+    const onRateLimit = (r: RateLimit) => useApp.setState({ rateLimit: r });
+    const primary = new GitHubClient({ token, baseUrl: s.apiBase || DIRECT_API, publicOnly: s.publicOnly, cache: etagCache, onRateLimit });
+    if (fallback) {
+      // Same conditional-request cache: entries are keyed by full URL, so proxy and direct responses never mix.
+      const direct = new GitHubClient({ token: fallback, baseUrl: DIRECT_API, publicOnly: s.publicOnly, cache: etagCache, onRateLimit });
+      withOrgFallback(primary, direct, oauthRestrictedOrgs, (owner) =>
+        useApp.getState().toast("info", `${owner} blocks the OAuth app, so Nonlinear is using your personal access token for ${owner}.`));
+    }
+    client = primary;
   }
   return client;
 }
@@ -119,7 +168,9 @@ export function describeError(e: unknown): string {
   if (e instanceof GitHubError) {
     switch (e.kind) {
       case "org-restricted":
-        return "This organization restricts third-party OAuth app access. GitHub requires an org owner to approve the app; use the prepared text/patch or open on GitHub instead.";
+        return useApp.getState().settings_().authMode === "oauth"
+          ? "This organization blocks the OAuth app. Ask an org owner to approve it, or add a fallback personal access token in Settings → GitHub access."
+          : "This organization restricts third-party OAuth app access. GitHub requires an org owner to approve the app; use the prepared text/patch or open on GitHub instead.";
       case "rate-limited":
         return "GitHub rate limit reached. Sign in or add a token to raise the limit; cached data remains available.";
       case "auth":

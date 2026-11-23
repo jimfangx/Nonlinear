@@ -43,7 +43,7 @@
   "screenshot": "https://nonlinear.cx/screenshots/review-nav.png",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "macOS, Web",
-  "softwareVersion": "0.1.13",
+  "softwareVersion": "0.1.14",
   "license": "https://opensource.org/licenses/MIT",
   "isAccessibleForFree": true,
   "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -281,7 +281,7 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
 <main>
 <header class="hero">
   <div class="wrap">
-    <a class="eyebrow" href="#releases" style="text-decoration:none"><b>New in 0.1.13</b> Private sync servers · <b>0.1.12</b> Go to definition, find in code <span aria-hidden="true">→</span></a>
+    <a class="eyebrow" href="#releases" style="text-decoration:none"><b>New in 0.1.14</b> Works in orgs that block OAuth apps <span aria-hidden="true">→</span></a>
     <h1>Ship releases that span <em>dozens of repos</em>.</h1>
     <p class="lede">Nonlinear is the release workbench for maintainers whose work doesn't fit in one repository. Triage PRs, untangle cross-repo dependency chains, pin submodules and review huge diffs, all in one place.</p>
     <div class="ctas">
@@ -454,7 +454,22 @@ nav.scrolled { box-shadow: 0 8px 30px -18px rgba(0,0,0,.5); }
     <div class="notes">
 
       <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.13</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div class="rel-meta"><span class="rel-ver">0.1.14</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Work in organizations that block OAuth apps.</b> Some organizations only allow OAuth apps an owner has approved, so comments and reviews there used to fail even though your account had access. Add a fallback personal access token under Settings → GitHub access, and Nonlinear uses it for just those organizations while keeping your normal sign-in everywhere else.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>When an organization blocks the app, the error explains both fixes: ask an owner to approve it, or add a fallback token.</li>
+            <li>Repeat reads in those organizations reuse cached answers, so they barely touch your GitHub rate limit.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.13</span><span class="rel-date">November 23, 2026</span></div>
         <div>
           <h4>New</h4>
           <ul>

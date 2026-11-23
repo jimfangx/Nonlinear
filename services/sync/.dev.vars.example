@@ -1,6 +1,9 @@
 # Local settings for `npm run dev` (wrangler dev on http://localhost:8787).
 # Copy to .dev.vars (git-ignored). Values here override [vars] in wrangler.toml, locally only.
 
+# Local app origins (the dev server and preview) plus the desktop app.
+ALLOWED_ORIGINS=http://localhost:5173,http://localhost:4173,tauri://localhost
+
 # Encrypts stored GitHub tokens in the local database: openssl rand -base64 32
 TOKEN_KEY=
 

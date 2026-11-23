@@ -5,7 +5,7 @@ import { fnv1a, monthOf, newSalt, parsePRKey, revalidate, type Intention, type R
 import { useApp, useSettings, DEFAULT_KEYS, DEFAULT_LSP } from "../lib/store";
 import { getSecret, setSecret, putBlob, getBlob, deleteBlob, eraseEverything } from "../lib/db";
 import { BACKGROUND_BLOB, COLOR_THEMES } from "../lib/theme";
-import { githubApi, githubAvatarUrl, resetClient, describeError, freshCapabilities, enrichPR, updatePRFields, writeChainBlock } from "../lib/github";
+import { githubApi, githubAvatarUrl, resetClient, describeError, freshCapabilities, enrichPR, updatePRFields, writeChainBlock, FALLBACK_TOKEN_SECRET, oauthRestrictedOrgs } from "../lib/github";
 import { resolveConflict, syncOnce } from "../lib/sync";
 import { cloudUrl, connect, currentState, disconnect, recoveryKey, requestPairing, resetEncryption, applyRecoveryKey, DEFAULT_CLOUD_URL, type CloudState } from "../lib/cloud";
 import { PROVIDERS } from "../lib/ai";
@@ -236,6 +236,7 @@ function GitHubSection() {
           </div>
         )}
       </div>
+      {s.authMode === "oauth" && <FallbackTokenPanel />}
       <div className="panel pad col">
         <b>Fine-grained personal access token (optional, stricter scoping)</b>
         <div className="faint small">
@@ -774,9 +775,69 @@ function DataSection() {
   );
 }
 
+/** Personal access token used only where an organization blocks the OAuth app. */
+function FallbackTokenPanel() {
+  const s = useSettings();
+  const toast = useApp((x) => x.toast);
+  const [value, setValue] = useState("");
+  const [saved, setSaved] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { void getSecret(FALLBACK_TOKEN_SECRET).then((t) => setSaved(!!t)); }, []);
+  const save = async () => {
+    const token = value.trim();
+    setBusy(true);
+    try {
+      // Check the token against GitHub directly, and that it belongs to the signed-in account.
+      const r = await fetch("https://api.github.com/user", { headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json" } });
+      if (!r.ok) throw new Error(r.status === 401 ? "GitHub rejected this token." : `GitHub returned ${r.status}.`);
+      const me = (await r.json()) as { login: string };
+      if (s.me && me.login.toLowerCase() !== s.me.toLowerCase()) throw new Error(`This token belongs to @${me.login}, but you're signed in as @${s.me}. Use a token from the same account.`);
+      await setSecret(FALLBACK_TOKEN_SECRET, token);
+      resetClient();
+      setSaved(true);
+      setValue("");
+      toast("success", `Fallback token saved for @${me.login}.`);
+    } catch (e) {
+      toast("error", (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const remove = async () => {
+    await setSecret(FALLBACK_TOKEN_SECRET, null);
+    oauthRestrictedOrgs.clear();
+    resetClient();
+    setSaved(false);
+    toast("info", "Fallback token removed.");
+  };
+  const used = [...oauthRestrictedOrgs];
+  return (
+    <div className="panel pad col">
+      <b>Fallback token for organizations that block the OAuth app</b>
+      <div className="faint small">
+        Some organizations only allow OAuth apps an owner has approved, so comments and reviews there fail even though your account has access. If you add a personal access token from the same account, Nonlinear uses it for just those organizations and keeps using the OAuth sign-in everywhere else.
+        A classic token with <code>public_repo</code> works in most organizations; a fine-grained token may need the organization's approval too. Stored only on this device{isDesktop() ? " (OS keychain)" : " (browser-local)"}; never synced or sent to the sync server.
+      </div>
+      {saved ? (
+        <div className="row">
+          <span className="chip ok">Saved</span>
+          <span className="faint small">{used.length ? `Used this session for: ${used.join(", ")}` : "Not needed yet this session."}</span>
+          <span className="spacer" />
+          <button className="btn sm" onClick={() => void remove()}>Remove</button>
+        </div>
+      ) : (
+        <div className="row">
+          <input aria-label="Fallback personal access token" className="input grow mono" type="password" placeholder="ghp_… or github_pat_…" value={value} onChange={(e) => setValue(e.target.value)} autoComplete="off" />
+          <button className="btn" disabled={busy || value.trim().length < 8} onClick={() => void save()}>{busy ? "Checking…" : "Save fallback token"}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Secret names this app stores (keychain on desktop, IndexedDB on web). */
 function secretKeyNames(): string[] {
-  return ["github-token", "sync-key", "sync-session", "sync-cursor", "nonlinear-selftest", ...PROVIDERS.map((p) => `ai-key:${p.id}`)];
+  return ["github-token", "github-pat-fallback", "sync-key", "sync-session", "sync-cursor", "nonlinear-selftest", ...PROVIDERS.map((p) => `ai-key:${p.id}`)];
 }
 
 function EraseDialog({ onClose }: { onClose: () => void }) {

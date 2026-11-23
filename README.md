@@ -92,7 +92,7 @@ Bring your own API key, or use a local **Claude Code** or **Codex CLI** install.
 ## Install
 
 ### macOS app
-Download the latest `.dmg` (currently **0.1.13**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
+Download the latest `.dmg` (currently **0.1.14**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
 
 > Current builds are Apple Silicon only and ad-hoc signed. The first time you open the app, right-click it and choose **Open**.
 
@@ -102,11 +102,15 @@ The desktop app adds local Git, SQLite storage, the OS keychain, LSP integration
 Nonlinear also runs as an installable PWA. Build it from source (see [Development](#development)) and serve `apps/web/dist`.
 
 ### Getting started
-1. Open **Settings → Nonlinear Cloud → Connect with GitHub**. That's one click, and the app only asks for public-repo scope.
+1. Sign in to GitHub, one of two ways:
+   - **With your team's sync server** (see [Self-hosting](#self-hosting-nonlinear-cloud)): open **Settings → Nonlinear Cloud → Advanced**, enter its URL, then click **Connect with GitHub**. This also syncs your data between devices. The app only asks for public-repo scope.
+   - **With a personal access token:** paste it under **Settings → GitHub access**. No server needed, but no sync either.
 2. Add the repositories you maintain.
 3. Start in the **Inbox**.
 
 You can also use Nonlinear without signing in to browse public repositories, but GitHub limits anonymous use to 60 requests per hour.
+
+**Organizations that block OAuth apps:** some organizations only allow OAuth apps an owner has approved, so comments and reviews there fail even though your account has access. Ask an owner to approve your sync server's OAuth App, or add a **fallback personal access token** (from the same account) under **Settings → GitHub access**. Nonlinear then uses that token for just those organizations and keeps the OAuth sign-in everywhere else.
 
 ## Privacy & security
 

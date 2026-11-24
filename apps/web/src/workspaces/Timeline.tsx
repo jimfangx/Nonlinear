@@ -282,6 +282,8 @@ function CreateTimeline({ onClose }: { onClose: () => void }) {
 }
 
 const ROW_H = 52;
+/** Width of a release pin handle's pointer/focus target (the visible mark is 12px). */
+const HANDLE_HIT = 28;
 const LABEL_W = 310;
 const AXIS_H = 42;
 const DOT_TILE_WIDTH = 512;
@@ -573,6 +575,13 @@ function TimelinePane({ tl, zoom, pxPerDay, onZoom, onZoomPreview, zoomPreviews,
     const wheel = (event: WheelEvent) => {
       if (!event.metaKey && !event.ctrlKey) {
         if (pending) finish();
+        // The sticky submodule/pin column is full of clipped (ellipsis) boxes that swallow the
+        // wheel in Chromium/WebKit instead of chaining it here, so scroll the timeline ourselves.
+        if (event.target instanceof Element && event.target.closest(".tl-label")) {
+          const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? element.clientHeight : 1;
+          event.preventDefault();
+          element.scrollBy({ left: event.deltaX * unit, top: event.deltaY * unit, behavior: "instant" });
+        }
         return;
       }
       event.preventDefault();
@@ -1190,6 +1199,8 @@ function TimelineRow({
   const startDrag = (rel: Release) => (e: React.PointerEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    // preventDefault() above also stops the browser from focusing the handle; focus it so ←/→ work right away.
+    (e.currentTarget as HTMLElement).focus({ preventScroll: true });
     const rect = canvasRef.current!.getBoundingClientRect();
     const move = (ev: PointerEvent) => {
       const c = nearest(ev.clientX - rect.left);
@@ -1305,20 +1316,18 @@ function TimelineRow({
               onPointerDown={editable ? startDrag(rel) : undefined}
               onKeyDown={editable ? keyMove(rel, p?.sha ?? row.pinned ?? "") : undefined}
               title={`${rel.name}: ${p ? p.sha.slice(0, 8) : "not set — follows current gitlink"}${editable ? " (drag or ←/→; Del clears)" : ""}`}
+              className={`tl-release-handle ${editable ? "editable" : ""}`}
               style={{
-                position: "absolute",
-                left: xOf(scale, at) - 6,
-                top: ROW_H / 2 - 12,
-                width: 12,
-                height: 24,
-                borderRadius: 3,
-                background: p ? rel.color : "transparent",
-                border: `2px ${p ? "solid" : "dashed"} ${rel.color}`,
+                // The hit area is wider and taller than the visible handle so it's easy to grab and focus.
+                left: xOf(scale, at) - HANDLE_HIT / 2,
+                width: HANDLE_HIT,
+                height: ROW_H,
                 cursor: editable ? "ew-resize" : "default",
-                zIndex: 3,
-                opacity: editable || p ? 1 : 0.6,
-              }}
-            />
+                "--release-color": rel.color,
+              } as React.CSSProperties}
+            >
+              <span className="tl-release-handle-mark" style={{ background: p ? rel.color : "transparent", borderStyle: p ? "solid" : "dashed", opacity: editable || p ? 1 : 0.6 }} />
+            </div>
           );
         })}
       </div>

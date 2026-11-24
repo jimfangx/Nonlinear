@@ -31,6 +31,8 @@ export interface FeatureCard {
   repos: RepoKey[];
   releases: string[];
   prs: PRKey[];
+  /** linked issues, `owner/repo#n` lowercased (absent on cards made before issues existed) */
+  issues?: string[];
   chains: string[];
   links: { title: string; url: string }[];
   checklist: ChecklistItem[];

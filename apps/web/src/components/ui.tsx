@@ -303,3 +303,38 @@ export function DiffStat({ additions, deletions, blocks = 5, compact = false }: 
     </span>
   );
 }
+
+/* ---------------- In-app confirmation ---------------- */
+// window.confirm() is a no-op in the macOS desktop webview (it returns false without showing
+// anything), so every confirmation goes through this dialog instead.
+
+interface ConfirmRequest { title: string; body: ReactNode; confirmLabel: string; danger: boolean; resolve: (ok: boolean) => void }
+let showConfirm: ((r: ConfirmRequest) => void) | null = null;
+
+export function askConfirm(o: { title: string; body: ReactNode; confirmLabel?: string; danger?: boolean }): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!showConfirm) return resolve(false);
+    showConfirm({ title: o.title, body: o.body, confirmLabel: o.confirmLabel ?? "Continue", danger: o.danger ?? false, resolve });
+  });
+}
+
+/** Mounted once in the app shell; renders requests from askConfirm(). */
+export function ConfirmHost() {
+  const [req, setReq] = useState<ConfirmRequest | null>(null);
+  useEffect(() => {
+    showConfirm = (r) => setReq((cur) => { cur?.resolve(false); return r; });
+    return () => { showConfirm = null; };
+  }, []);
+  if (!req) return null;
+  const done = (ok: boolean) => { req.resolve(ok); setReq(null); };
+  return (
+    <Modal open title={req.title} onClose={() => done(false)}
+      footer={<>
+        <span className="spacer" />
+        <button className="btn" onClick={() => done(false)}>Cancel</button>
+        <button className={`btn ${req.danger ? "danger" : "primary"}`} autoFocus onClick={() => done(true)}>{req.confirmLabel}</button>
+      </>}>
+      <div>{req.body}</div>
+    </Modal>
+  );
+}

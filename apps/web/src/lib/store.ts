@@ -167,6 +167,8 @@ export interface Settings {
   deviceId: string;
   lastSyncAt: number | null;
   lastSyncError: string | null;
+  /** when the user confirmed saving this device's recovery key (null: never shown/confirmed) */
+  recoveryKeySavedAt?: number | null;
   policy: ClassificationPolicy;
   budgets: Partial<Record<string, BudgetPolicy>>;
   models: ModelInfo[];
@@ -248,6 +250,7 @@ export const DEFAULT_SETTINGS: Settings = {
   deviceId: newId("dev"),
   lastSyncAt: null,
   lastSyncError: null,
+  recoveryKeySavedAt: null,
   policy: DEFAULT_POLICY,
   budgets: { openai: DEFAULT_BUDGET, anthropic: DEFAULT_BUDGET },
   models: DEFAULT_MODELS,
@@ -287,6 +290,7 @@ export const COLLECTIONS = {
   /** Ask AI conversations, per PR (this device only) */
   aiChats: { synced: false, kind: "pref" },
   prs: { synced: false, kind: "pref" },
+  issues: { synced: false, kind: "pref" },
   repos: { synced: false, kind: "pref" },
   summaries: { synced: false, kind: "pref" },
   ledger: { synced: false, kind: "pref" },
@@ -318,6 +322,7 @@ export interface Collections {
   reviewSignals: Record<string, { at: number }>;
   aiChats: Record<string, AIChat>;
   prs: Record<string, PRSnapshot>;
+  issues: Record<string, import("@nonlinear/core").IssueSnapshot>;
   repos: Record<string, RepoInfo>;
   summaries: Record<string, SummaryRecord>;
   ledger: Record<string, LedgerEntry>;
@@ -343,8 +348,26 @@ export interface AppState extends Collections {
 
 const empty = (): Collections => ({
   views: {}, timelines: {}, releases: {}, pins: {}, cards: {}, placements: {}, notes: {}, reviews: {}, localEdges: {}, chains: {},
-  prLocal: {}, prEvents: {}, syncBase: {}, syncConflicts: {}, drafts: {}, intentions: {}, staged: {}, reviewSignals: {}, aiChats: {}, prs: {}, repos: {}, summaries: {}, ledger: {}, diffs: {}, settings: {},
+  prLocal: {}, prEvents: {}, syncBase: {}, syncConflicts: {}, drafts: {}, intentions: {}, staged: {}, reviewSignals: {}, aiChats: {}, prs: {}, issues: {}, repos: {}, summaries: {}, ledger: {}, diffs: {}, settings: {},
 });
+
+/**
+ * Queue every synced record on this device for upload, e.g. after the encryption key was reset
+ * (the server's copy was deleted). Returns the number of records queued.
+ */
+export function republishAll(): number {
+  const st = useApp.getState();
+  const deviceId = st.settings_().deviceId;
+  let n = 0;
+  for (const c of Object.keys(COLLECTIONS) as CollectionName[]) {
+    if (!COLLECTIONS[c].synced) continue;
+    for (const [id, value] of Object.entries(st[c] as Record<string, unknown>)) {
+      recordOp(c, id, "set", value, deviceId);
+      n++;
+    }
+  }
+  return n;
+}
 
 function recordOp(c: CollectionName, id: string, action: Op["action"], payload: unknown, deviceId: string) {
   const meta = COLLECTIONS[c];

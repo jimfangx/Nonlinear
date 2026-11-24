@@ -92,7 +92,7 @@ Bring your own API key, or use a local **Claude Code** or **Codex CLI** install.
 ## Install
 
 ### macOS app
-Download the latest `.dmg` (currently **0.1.16**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
+Download the latest `.dmg` (currently **0.1.17**) from [Releases](https://github.com/jimfangx/Nonlinear/releases), then drag **Nonlinear** into Applications.
 
 > Current builds are Apple Silicon only and ad-hoc signed. The first time you open the app, right-click it and choose **Open**.
 

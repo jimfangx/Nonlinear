@@ -1,5 +1,5 @@
 import { useShallow } from "zustand/react/shallow";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   columnCards,
@@ -18,6 +18,8 @@ import { CachedEntry } from "../components/CachedEntry";
 import { RepoEntry } from "../components/RepoEntry";
 import { useCachedRepositories } from "../components/RepositoryShortcuts";
 import { renderMarkdown } from "../lib/markdown";
+import { createIssue, deferredNotice, describeError, lookupNumber, WriteBlocked } from "../lib/github";
+import type { CachedOption } from "../components/CachedEntry";
 import { useChainGraph } from "../lib/chains";
 
 /** Feature kanban (§4): shared cards, per-context placements. */
@@ -42,9 +44,11 @@ export function Board() {
     else next.delete("card");
     return next;
   }, { replace: true });
+  const [freshCard, setFreshCard] = useState<string | null>(null);
   const createCard = () => {
     const card = newCardInContext(newId("card"), "New feature", ctx);
     useApp.getState().put("cards", card.id, card);
+    setFreshCard(card.id);
     openCard(card);
   };
   useEffect(() => {
@@ -148,7 +152,7 @@ export function Board() {
           );
         })}
       </div>
-      {editing && !editing.deleted && <CardEditor key={editing.id} card={editing} onClose={() => openCard(null)} />}
+      {editing && !editing.deleted && <CardEditor key={editing.id} card={editing} fresh={freshCard === editing.id} context={ctx} onClose={() => { setFreshCard(null); openCard(null); }} />}
       </Split>
       </div>
     </div>
@@ -193,6 +197,7 @@ function CardView({ card, dragging, focused, onFocus, onDragStart, onDragEnd, on
           </span>
         ))}
         {card.prs.length > 0 && <span className="chip info">⇄ {card.prs.length} PR</span>}
+        {(card.issues?.length ?? 0) > 0 && <span className="chip">◉ {card.issues!.length} issue{card.issues!.length === 1 ? "" : "s"}</span>}
         {card.checklist.length > 0 && <span className={`chip ${done === card.checklist.length ? "ok" : ""}`}>☑ {done}/{card.checklist.length}</span>}
         {blockedDeps.length > 0 && <span className="chip warn">⛓ {blockedDeps.length} dep</span>}
         {unmergedUpstream.length > 0 && <span className="chip warn" title={unmergedUpstream.join(", ")}>⬆ {unmergedUpstream.length} upstream open</span>}
@@ -201,7 +206,33 @@ function CardView({ card, dragging, focused, onFocus, onDragStart, onDragEnd, on
   );
 }
 
-function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void }) {
+const DEFAULT_TITLE = "New feature";
+
+function uniqueOptions(options: CachedOption[]): CachedOption[] {
+  const seen = new Set<string>();
+  return options.filter((o) => !seen.has(o.value) && !!seen.add(o.value));
+}
+
+/**
+ * Resolve what was typed in a link box (`owner/repo#12`, `#12` or `12`) to a PR or issue.
+ * Bare numbers are tried against the card's repositories first, then the board's and views'.
+ */
+async function resolveRef(value: string, repos: string[], want: "pr" | "issue"): Promise<{ key: string; title: string; repo: string } | null> {
+  const text = value.trim();
+  const full = parsePRKey(text);
+  const bare = /^#?(\d+)$/.exec(text);
+  const targets = full ? [{ repo: `${full.owner}/${full.repo}`.toLowerCase(), n: full.number }] : bare ? repos.slice(0, 8).map((repo) => ({ repo, n: Number(bare[1]) })) : [];
+  for (const { repo, n } of targets) {
+    const hit = await lookupNumber(repo, n);
+    if (!hit) continue;
+    if (hit.kind === "pr" && want === "pr") return { key: hit.key, title: hit.title, repo };
+    if (hit.kind === "issue" && want === "issue") return { key: hit.issue.key, title: hit.issue.title, repo };
+    if (full) return null; // exact reference of the other kind
+  }
+  return null;
+}
+
+function CardEditor({ card, fresh, context, onClose }: { card: FeatureCard; fresh: boolean; context: string; onClose: () => void }) {
   const put = useApp((s) => s.put);
   const cards = useApp((s) => s.cards);
   const releases = useApp((s) => s.releases);
@@ -213,24 +244,104 @@ function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void 
   const [prIn, setPrIn] = useState("");
   const [item, setItem] = useState("");
   const [repoIn, setRepoIn] = useState("");
+  const [issueIn, setIssueIn] = useState("");
+  const issues = useApp((s) => s.issues);
+  const views = useApp((s) => s.views);
+  const toast = useApp((s) => s.toast);
+  const titleRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (!fresh) return;
+    titleRef.current?.focus();
+    titleRef.current?.select();
+  }, [fresh]);
   const save = (next: FeatureCard) => put("cards", next.id, { ...next, updatedAt: Date.now() });
-  const linkPR = (value: string) => {
-    const pr = parsePRKey(value.trim());
-    if (!pr) return;
-    save({ ...c, prs: [...new Set([...c.prs, `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase()])] });
-    setPrIn("");
+  /** Always the latest stored card, so async lookups don't overwrite edits made meanwhile. */
+  const latest = () => useApp.getState().cards[c.id] ?? c;
+  const lookupRepos = [...new Set([...c.repos, ...(context.startsWith("repo:") ? [context.slice(5)] : []), ...Object.values(views).flatMap((v) => v.repos)].map((r) => r.toLowerCase()))];
+  const numberOptions = (typed: string, kind: "pr" | "issue"): CachedOption[] => {
+    const n = /^#?(\d+)$/.exec(typed.trim())?.[1];
+    if (!n) return [];
+    const pool = kind === "pr" ? Object.values(prs).map((p) => ({ key: p.key, title: p.title })) : Object.values(issues).map((i) => ({ key: i.key, title: i.title }));
+    return pool.filter((x) => x.key.endsWith(`#${n}`)).sort((a, b) => Number(lookupRepos.indexOf(a.key.split("#")[0]!) < 0) - Number(lookupRepos.indexOf(b.key.split("#")[0]!) < 0)).map((x) => ({ value: x.key, detail: x.title }));
+  };
+  const link = async (value: string, kind: "pr" | "issue") => {
+    if (!value.trim()) return;
+    (kind === "pr" ? setPrIn : setIssueIn)("");
+    const hit = await resolveRef(value, lookupRepos, kind);
+    if (!hit) {
+      toast("warn", `Couldn't find ${kind === "pr" ? "a pull request" : "an issue"} “${value.trim()}”${/^#?\d+$/.test(value.trim()) ? " in this card's or your views' repositories" : ""}.`);
+      return;
+    }
+    const cur = latest();
+    const list = kind === "pr" ? cur.prs : cur.issues ?? [];
+    save({
+      ...cur,
+      ...(kind === "pr" ? { prs: [...new Set([...list, hit.key])] } : { issues: [...new Set([...list, hit.key])] }),
+      repos: [...new Set([...cur.repos, hit.repo])],
+      title: !cur.title.trim() || cur.title === DEFAULT_TITLE ? hit.title : cur.title,
+    });
+  };
+  const linkPR = (value: string) => void link(value, "pr");
+  const linkIssue = (value: string) => void link(value, "issue");
+  const [issueRepo, setIssueRepo] = useState("");
+  const [creatingIssue, setCreatingIssue] = useState(false);
+  const issueTargets = lookupRepos;
+  const targetRepo = issueRepo || c.repos[0] || issueTargets[0] || "";
+  const openUpstream = async () => {
+    if (!targetRepo || creatingIssue) return;
+    setCreatingIssue(true);
+    try {
+      const cur = latest();
+      const res = await createIssue(targetRepo, cur.title.trim() || DEFAULT_TITLE, cardDescription(cur));
+      const notice = deferredNotice(res, "Issue");
+      if (notice) toast("warn", notice);
+      else if (res && typeof res === "object" && "key" in res) {
+        const now = latest();
+        save({ ...now, issues: [...new Set([...(now.issues ?? []), res.key])], repos: [...new Set([...now.repos, targetRepo])] });
+        toast("success", `Opened ${res.key} on GitHub.`);
+      }
+    } catch (e) {
+      toast("error", e instanceof WriteBlocked ? e.message : describeError(e));
+    } finally {
+      setCreatingIssue(false);
+    }
+  };
+  /** ⌘/Ctrl+Enter: keep whatever is half-typed in the entry boxes, then close the card. */
+  const commitAndClose = () => {
+    if (item.trim()) save({ ...latest(), checklist: [...latest().checklist, { id: newId("ck"), text: item.trim(), done: false }] });
+    if (repoIn.trim()) linkRepo(repoIn);
+    if (prIn.trim()) linkPR(prIn);
+    if (issueIn.trim()) linkIssue(issueIn);
+    onClose();
   };
   const linkRepo = (value: string) => {
     const repo = value.trim().toLowerCase();
     if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) return;
-    save({ ...c, repos: [...new Set([...c.repos, repo])] });
+    save({ ...latest(), repos: [...new Set([...latest().repos, repo])] });
     setRepoIn("");
   };
   return (
-    <aside className="board-details" aria-label="Feature card" data-search-pane>
+    <aside className="board-details" aria-label="Feature card" data-search-pane onKeyDownCapture={(e) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        commitAndClose();
+      }
+    }}>
       <div className="inbox-detail-header"><span>Feature card</span><button className="btn ghost sm" aria-label="Close card" onClick={onClose}>✕</button></div>
       <div className="col pad">
-        <input className="input" style={{ fontSize: 16, fontWeight: 600 }} value={c.title} onChange={(e) => save({ ...c, title: e.target.value })} aria-label="Title" />
+        <input ref={titleRef} className="input" style={{ fontSize: 16, fontWeight: 600 }} value={c.title} onChange={(e) => save({ ...c, title: e.target.value })} aria-label="Title" />
+        {!(c.issues?.length) && issueTargets.length > 0 && (
+          <div className="row small board-upstream" role="group" aria-label="Create upstream issue">
+            <span className="faint">Track upstream:</span>
+            <select className="input" aria-label="Repository for the new issue" value={targetRepo} onChange={(e) => setIssueRepo(e.target.value)}>
+              {issueTargets.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <button className="btn sm" disabled={creatingIssue} title="Open a GitHub issue with this card's title and description, and link it" onClick={() => void openUpstream()}>
+              {creatingIssue ? "Creating…" : "Create as GitHub issue"}
+            </button>
+          </div>
+        )}
         <MarkdownField label="Description / completion criteria" value={cardDescription(c)} onChange={(description) => save({ ...c, description, links: [] })} />
         <div className="col" style={{ gap: 16 }}>
           <div className="grow col">
@@ -261,8 +372,27 @@ function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void 
                 </div>
               );
             })}
-            <CachedEntry label="Link pull request" placeholder="owner/repo#123 + Enter" value={prIn} onChange={setPrIn} onSelect={linkPR}
-              options={Object.values(prs).filter((pr) => !c.prs.includes(pr.key)).map((pr) => ({ value: pr.key, detail: pr.title }))} />
+            <CachedEntry label="Link pull request" placeholder="#123 or owner/repo#123 + Enter" value={prIn} onChange={setPrIn} onSelect={linkPR}
+              options={uniqueOptions([...numberOptions(prIn, "pr"), ...Object.values(prs).map((pr) => ({ value: pr.key, detail: pr.title }))]).filter((o) => !c.prs.includes(o.value))}
+              search={async (q) => { const hit = await resolveRef(q, lookupRepos, "pr"); return hit ? [{ value: hit.key, detail: hit.title }] : []; }} />
+
+            <h3 className="h3">Linked issues</h3>
+            {(c.issues ?? []).map((k) => {
+              const issue = issues[k];
+              const r = parsePRKey(k);
+              return (
+                <div key={k} className="row small">
+                  <a href={issue?.url ?? `https://github.com/${r?.owner}/${r?.repo}/issues/${r?.number}`} target="_blank" rel="noreferrer" className="grow ellipsis">
+                    {k} {issue?.title}
+                  </a>
+                  <span className="chip">{issue?.state ?? "?"}</span>
+                  <button className="btn ghost sm" aria-label={`Unlink ${k}`} onClick={() => save({ ...latest(), issues: (latest().issues ?? []).filter((x) => x !== k) })}>✕</button>
+                </div>
+              );
+            })}
+            <CachedEntry label="Link issue" placeholder="#123 or owner/repo#123 + Enter" value={issueIn} onChange={setIssueIn} onSelect={linkIssue}
+              options={uniqueOptions([...numberOptions(issueIn, "issue"), ...Object.values(issues).map((i) => ({ value: i.key, detail: i.title }))]).filter((o) => !(c.issues ?? []).includes(o.value))}
+              search={async (q) => { const hit = await resolveRef(q, lookupRepos, "issue"); return hit ? [{ value: hit.key, detail: hit.title }] : []; }} />
             <MarkdownField label="Private notes" value={c.notes ?? ""} onChange={(notes) => save({ ...c, notes })} />
           </div>
           <div className="col">
@@ -312,7 +442,7 @@ function CardEditor({ card, onClose }: { card: FeatureCard; onClose: () => void 
         <div className="row">
           <button className="btn danger" onClick={() => { save({ ...c, deleted: true }); onClose(); }}>Delete</button>
           <span className="spacer" />
-          <button className="btn primary" onClick={onClose}>Done</button>
+          <button className="btn primary" onClick={commitAndClose} title="⌘/Ctrl+Enter">Done</button>
         </div>
       </div>
     </aside>

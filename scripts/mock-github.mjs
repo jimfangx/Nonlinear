@@ -5,6 +5,9 @@
 //
 // Usage: node scripts/mock-github.mjs [port]     (default 4010)
 import http from "node:http";
+const issues = {};
+const MILESTONES = [{ number: 7, title: "1.14.0" }, { number: 8, title: "1.15.0" }];
+const issueJson = (key, number, title, user, body = "") => ({ number, title, body, state: "open", html_url: `https://github.com/${key}/issues/${number}`, user: { login: user }, labels: [], assignees: [], milestone: null, comments: 0, created_at: new Date(Date.now() - 86400000).toISOString(), updated_at: new Date().toISOString(), closed_at: null });
 
 const PORT = Number(process.argv[2] ?? 4010);
 const DAY = 864e5;
@@ -101,7 +104,7 @@ function pullJson(key) {
   return {
     id: p.number, node_id: `PR_${p.number}`, number: p.number, title: p.title, body: p.body, state: p.state ?? "open", draft: p.draft, user: { login: p.user },
     head: { ref: p.headRef, sha: p.head, repo: { full_name: p.repo } }, base: { ref: p.base, sha: p.baseSha, repo: { full_name: p.repo, private: false } },
-    labels: (p.labels ?? []).map((name) => ({ name })), milestone: null, assignees: [], requested_reviewers: p.reviewers.map((login) => ({ login })), requested_teams: [],
+    labels: (p.labels ?? []).map((name) => ({ name })), milestone: p.milestone ?? null, assignees: [], requested_reviewers: p.reviewers.map((login) => ({ login })), requested_teams: [],
     merged_at: p.mergedAt ?? null, closed_at: p.mergedAt ?? null, created_at: p.created, updated_at: p.updated, html_url: `https://github.com/${p.repo}/pull/${p.number}`,
     mergeable: true, mergeable_state: "clean", additions: 6, deletions: 2, changed_files: (p.diff.match(/^diff --git/gm) ?? []).length, comments: (comments[key] ?? []).length, review_comments: 0, merge_commit_sha: p.mergeCommit ?? null, _owner: owner,
   };
@@ -209,7 +212,28 @@ const server = http.createServer(async (req, res) => {
     return send(200, comments[k] ?? []);
   }
   if ((m = /^\/issues\/(\d+)\/labels$/.exec(rest))) { const pr = prs[`${key}#${m[1]}`]; if (pr) pr.labels = json.labels; return send(200, []); }
-  if (/^\/issues\/\d+$/.test(rest)) return send(200, {});
+  if (rest.startsWith("/issues") && !rest.includes("/comments") && !rest.includes("/labels")) {
+    const list = (issues[key] ??= key === "ucb-bar/chipyard" ? [issueJson(key, 42, "Rocket tile hangs on reset", "maintainer")] : []);
+    if (rest === "/issues" && req.method === "GET") return send(200, [...list, ...Object.keys(prs).filter((k) => k.startsWith(key + "#")).map((k) => ({ ...issueJson(key, prs[k].number, prs[k].title, prs[k].user), pull_request: {} }))]);
+    if (rest === "/issues" && req.method === "POST") {
+      if (!authed) return send(401, { message: "Requires authentication" });
+      const issue = issueJson(key, 100 + list.length, json.title, "maintainer", json.body);
+      list.push(issue);
+      return send(201, issue);
+    }
+    const n = Number(rest.slice("/issues/".length));
+    const pr = prs[`${key}#${n}`];
+    const issue = list.find((i) => i.number === n);
+    if (req.method === "PATCH") {
+      if (!authed) return send(401, { message: "Requires authentication" });
+      const ms = json.milestone == null ? null : { number: json.milestone, title: MILESTONES.find((x) => x.number === json.milestone)?.title ?? "?" };
+      if (issue) issue.milestone = ms;
+      if (pr) pr.milestone = ms;
+      return send(200, issue ?? {});
+    }
+    if (pr) return send(200, { ...issueJson(key, n, pr.title, pr.user), pull_request: {} });
+    return issue ? send(200, issue) : send(404, { message: "Not Found" });
+  }
   if ((m = /^\/commits\/([^/]+)\/status$/.exec(rest))) {
     const pr = Object.values(prs).find((x) => x.head === m[1]);
     return send(200, { state: pr?.ci ?? "success", total_count: pr ? 1 : 0 });
@@ -258,7 +282,7 @@ const server = http.createServer(async (req, res) => {
   if (rest === "/branches") return send(200, [{ name: r.default, commit: { sha: r.hist[0].sha } }, ...(r.extra ? [{ name: "fix-iter95", commit: { sha: r.extra[0].sha } }] : [])]);
   if (rest === "/tags") return send(200, [{ name: "v1.0.0", commit: { sha: r.hist[Math.min(3, r.hist.length - 1)].sha } }]);
   if (rest === "/labels") return send(200, [{ name: "bug", color: "f00" }]);
-  if (rest === "/milestones") return send(200, []);
+  if (rest === "/milestones") return send(200, MILESTONES);
   if ((m = /^\/compare\/([^.]+)\.\.\.(.+)$/.exec(rest))) {
     const [a, b] = [decodeURIComponent(m[1]), decodeURIComponent(m[2])];
     if (accept.includes("diff")) return send(200, scalaDiff("src/main/scala/v3/exu/issue-unit.scala", 7), "text/plain");

@@ -22,7 +22,10 @@ export interface Env {
   GITHUB_WEB?: string;
 }
 
-const SESSION_TTL_MS = 12 * 3600_000;
+/** Sliding session lifetime: every authenticated call pushes expiry forward (at most once an hour). */
+const SESSION_TTL_MS = 30 * 86_400_000;
+/** An expired session can still be exchanged at /auth/refresh for this long (the GitHub token itself does not expire). */
+const REFRESH_GRACE_MS = 60 * 86_400_000;
 const MAX_OPS_PER_PUSH = 200;
 const MAX_CIPHERTEXT = 64 * 1024;
 const MAX_PROXY_BODY = 1024 * 1024;
@@ -82,7 +85,7 @@ function cors(env: Env, req: Request): Record<string, string> {
     "access-control-allow-credentials": "true",
     "access-control-allow-headers": "authorization,content-type,accept,x-github-api-version,if-none-match",
     "access-control-allow-methods": "GET,POST,PATCH,PUT,DELETE,OPTIONS",
-    "access-control-expose-headers": "x-ratelimit-limit,x-ratelimit-remaining,x-ratelimit-reset,etag",
+    "access-control-expose-headers": "x-ratelimit-limit,x-ratelimit-remaining,x-ratelimit-reset,x-ratelimit-resource,etag",
     vary: "origin",
   };
 }
@@ -124,6 +127,9 @@ async function session(env: Env, req: Request): Promise<Session | null> {
   if (!row || row.expires_at < Date.now()) return null;
   // Removing someone from ALLOWED_USERS cuts off their existing sessions too.
   if (!userAllowed(env, row.login)) return null;
+  if (row.expires_at - Date.now() < SESSION_TTL_MS - 3600_000) {
+    await env.DB.prepare("UPDATE sessions SET expires_at = ? WHERE id_hash = ?").bind(Date.now() + SESSION_TTL_MS, await sha256(secret)).run();
+  }
   return { userId: row.user_id, token: await open(env, row.token_ct), scopes: row.scopes };
 }
 
@@ -219,6 +225,24 @@ async function authSession(env: Env, req: Request): Promise<Response> {
   return json(env, req, 200, { session: secret, login: s?.login, scopes: s?.scopes ?? "" });
 }
 
+/**
+ * Swap a session (live, or expired within the grace period) for a fresh one, so apps
+ * renew silently instead of failing with 401. The old secret stops working.
+ */
+async function authRefresh(env: Env, req: Request): Promise<Response> {
+  const auth = req.headers.get("authorization") ?? "";
+  if (!auth.startsWith("Bearer ")) return json(env, req, 401, { error: "unauthorized" });
+  const oldHash = await sha256(auth.slice(7));
+  const row = await env.DB.prepare("SELECT s.user_id, s.token_ct, s.scopes, s.expires_at, u.login FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.id_hash = ?").bind(oldHash).first<{ user_id: number; token_ct: string; scopes: string; expires_at: number; login: string }>();
+  if (!row || row.expires_at + REFRESH_GRACE_MS < Date.now() || !userAllowed(env, row.login)) return json(env, req, 401, { error: "session cannot be renewed; sign in again" });
+  const secret = randomToken();
+  await env.DB.prepare("INSERT INTO sessions (id_hash, user_id, token_ct, scopes, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+    .bind(await sha256(secret), row.user_id, row.token_ct, row.scopes, Date.now() + SESSION_TTL_MS, Date.now())
+    .run();
+  await env.DB.prepare("DELETE FROM sessions WHERE id_hash = ?").bind(oldHash).run();
+  return json(env, req, 200, { session: secret, login: row.login, scopes: row.scopes });
+}
+
 async function authLogout(env: Env, req: Request): Promise<Response> {
   const s = await session(env, req);
   const auth = req.headers.get("authorization") ?? "";
@@ -258,7 +282,7 @@ async function proxy(env: Env, req: Request, url: URL): Promise<Response> {
     body,
   });
   const h = new Headers(cors(env, req));
-  for (const k of ["content-type", "etag", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "link"]) {
+  for (const k of ["content-type", "etag", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-resource", "link"]) {
     const v = upstream.headers.get(k);
     if (v) h.set(k, v);
   }
@@ -373,6 +397,7 @@ export default {
       if (url.pathname === "/auth/github/callback") return authCallback(env, req, url);
       if (url.pathname === "/auth/session" && req.method === "POST") return authSession(env, req);
       if (url.pathname === "/auth/logout" && req.method === "POST") return authLogout(env, req);
+      if (url.pathname === "/auth/refresh" && req.method === "POST") return authRefresh(env, req);
       if (url.pathname.startsWith("/gh/")) return proxy(env, req, url);
       if (url.pathname === "/v1/keycheck") return keycheck(env, req);
       if (url.pathname === "/v1/pair" || url.pathname.startsWith("/v1/pair/")) return pairing(env, req, url);

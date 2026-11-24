@@ -16,6 +16,7 @@ export function PRDetail({ prKey }: { prKey: string }) {
   const online = useApp((s) => s.online);
   const [editing, setEditing] = useState<null | "body" | "labels" | "reviewers">(null);
   const [linkCard, setLinkCard] = useState(false);
+  const [milestoneOpen, setMilestoneOpen] = useState(false);
   const r = parsePRKey(prKey);
   const repoKey = r ? `${r.owner}/${r.repo}`.toLowerCase() : "";
   const [loading, setLoading] = useState(false);
@@ -91,6 +92,9 @@ export function PRDetail({ prKey }: { prKey: string }) {
         <Field label="Labels" onEdit={caps.has("can-edit-metadata") ? () => setEditing("labels") : undefined}>
           {pr.labels.length ? pr.labels.map((l) => <span key={l} className="chip" style={{ marginRight: 4 }}>{l}</span>) : "—"}
         </Field>
+        <Field label="Milestone" onEdit={caps.has("can-edit-metadata") ? () => setMilestoneOpen(true) : undefined}>
+          {pr.milestone ? <span className="chip info">⚑ {pr.milestone}</span> : "—"}
+        </Field>
         <Field label="Assignees">{pr.assignees.join(", ") || "—"}</Field>
         <Field label="Updated">{timeAgo(pr.updatedAt)}</Field>
       </section>
@@ -129,6 +133,8 @@ export function PRDetail({ prKey }: { prKey: string }) {
         />
       )}
       <PRComments key={prKey} owner={pr.owner} repo={pr.repo} number={pr.number} />
+      {milestoneOpen && <MilestoneModal owner={pr.owner} repo={pr.repo} itemKey={prKey} current={pr.milestone} onClose={() => setMilestoneOpen(false)}
+        onPick={async (milestone) => deferredNotice(await updatePRFields(prKey, { milestone }), "Milestone")} />}
       {linkCard && <LinkCardModal prKey={prKey} onClose={() => setLinkCard(false)} />}
     </div>
   );
@@ -227,6 +233,46 @@ function EditModal({ kind, prKey, onClose, onSave }: { kind: "body" | "labels" |
       ) : (
         <input aria-label={`Edit ${kind}`} className="input" style={{ width: "100%" }} value={v} onChange={(e) => setV(e.target.value)} placeholder="comma separated" />
       )}
+    </Modal>
+  );
+}
+
+/** Pick an open milestone of `owner/repo` (or clear it); `onPick` performs the write. */
+export function MilestoneModal({ owner, repo, itemKey, current, onPick, onClose }: { owner: string; repo: string; itemKey: string; current: string | null; onPick: (number: number | null) => Promise<string | null>; onClose: () => void }) {
+  const toast = useApp((s) => s.toast);
+  const [options, setOptions] = useState<{ number: number; title: string }[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void githubApi().then((api) => api.milestones(owner, repo)).then((m) => live && setOptions(m), (e) => live && setError(describeError(e)));
+    return () => { live = false; };
+  }, [owner, repo]);
+  const pick = async (number: number | null) => {
+    setBusy(true);
+    try {
+      const notice = await onPick(number);
+      toast(notice ? "warn" : "success", notice ?? (number === null ? "Milestone cleared" : "Milestone set on GitHub"));
+      onClose();
+    } catch (e) {
+      toast("error", e instanceof WriteBlocked ? e.message : describeError(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title={`Milestone — ${itemKey}`} onClose={onClose}>
+      <div className="col" aria-label="Milestones">
+        {error && <div className="small err">{error}</div>}
+        {!options && !error && <div className="faint small">Loading milestones…</div>}
+        {options?.length === 0 && <div className="faint small">{owner}/{repo} has no open milestones.</div>}
+        {options?.map((m) => (
+          <button key={m.number} aria-pressed={current === m.title} disabled={busy} className={`btn ${current === m.title ? "primary" : ""}`} style={{ justifyContent: "flex-start" }} onClick={() => void pick(m.number)}>
+            ⚑ {m.title}
+          </button>
+        ))}
+        {current && <button className="btn ghost" disabled={busy} onClick={() => void pick(null)}>Clear milestone</button>}
+      </div>
     </Modal>
   );
 }

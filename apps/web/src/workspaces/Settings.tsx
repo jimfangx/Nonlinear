@@ -10,7 +10,7 @@ import { resolveConflict, syncOnce } from "../lib/sync";
 import { cloudUrl, connect, currentState, disconnect, recoveryKey, requestPairing, resetEncryption, applyRecoveryKey, DEFAULT_CLOUD_URL, type CloudState } from "../lib/cloud";
 import { PROVIDERS, aiPolicyActive } from "../lib/ai";
 import { isDesktop, desktop } from "../lib/platform";
-import { download, timeAgo, Modal } from "../components/ui";
+import { askConfirm, download, timeAgo, Modal } from "../components/ui";
 
 export function SettingsPage() {
   useEffect(() => {
@@ -510,7 +510,7 @@ function CloudSection() {
             <button className="btn sm" onClick={() => run(async () => setShownRk(await recoveryKey()))}>
               Show recovery key
             </button>
-            <button className="btn sm danger" onClick={() => run(async () => { await disconnect(); setState({ kind: "disconnected" }); toast("info", "Disconnected from Nonlinear Cloud. Local data is kept."); })}>
+            <button className="btn sm danger" onClick={async () => { if (!s.recoveryKeySavedAt && !(await askConfirm({ title: "Disconnect without a saved recovery key?", body: "Disconnecting removes this device's encryption key. You haven't confirmed saving your recovery key, so if no other device is connected you won't be able to read your synced data again.", confirmLabel: "Disconnect anyway", danger: true }))) return; void run(async () => { await disconnect(); setState({ kind: "disconnected" }); toast("info", "Disconnected from Nonlinear Cloud. Local data is kept."); }); }}>
               Disconnect
             </button>
           </div>
@@ -544,7 +544,7 @@ function CloudSection() {
           </div>
           <details>
             <summary className="small faint">Lost all devices and the recovery key?</summary>
-            <button className="btn sm danger" onClick={() => { if (confirm("Start over with a new encryption key? Previously synced cloud data becomes unreadable and is deleted. Local data on this device is kept.")) void run(async () => { await resetEncryption(); setState({ kind: "connected", login: state.login }); }); }}>
+            <button className="btn sm danger" onClick={async () => { if (await askConfirm({ title: "Reset cloud encryption?", body: "Nonlinear creates a new encryption key and deletes the cloud copy encrypted with the old key. Everything on this device is then re-encrypted with the new key and uploaded, and you'll get a new recovery key to save.", confirmLabel: "Reset and re-upload", danger: true })) void run(async () => { const { uploaded } = await resetEncryption(); setState({ kind: "connected", login: state.login }); toast("success", `New encryption key created. Uploaded ${uploaded} item${uploaded === 1 ? "" : "s"} from this device.`); }); }}>
               Reset cloud encryption
             </button>
           </details>

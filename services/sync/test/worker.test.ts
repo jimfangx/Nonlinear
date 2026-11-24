@@ -85,6 +85,28 @@ describe("auth", () => {
   });
 });
 
+describe("session renewal", () => {
+  it("swaps an expired session for a fresh one and retires the old secret", async () => {
+    const old = await login();
+    const auth = { authorization: `Bearer ${old}` };
+    expect((await call("/v1/me", { headers: auth })).status).toBe(200);
+    // Expire it (as the old 12-hour sessions did).
+    await env.DB.prepare("UPDATE sessions SET expires_at = ?").bind(Date.now() - 86_400_000).run();
+    expect((await call("/v1/me", { headers: auth })).status).toBe(401);
+    const r = await call("/auth/refresh", { method: "POST", headers: auth });
+    expect(r.status).toBe(200);
+    const fresh = (await r.json()) as { session: string; login: string };
+    expect(fresh.login).toBe("maintainer");
+    expect((await call("/v1/me", { headers: { authorization: `Bearer ${fresh.session}` } })).status).toBe(200);
+    expect((await call("/auth/refresh", { method: "POST", headers: auth })).status).toBe(401);
+  });
+  it("refuses sessions past the grace period", async () => {
+    const old = await login();
+    await env.DB.prepare("UPDATE sessions SET expires_at = ?").bind(Date.now() - 365 * 86_400_000).run();
+    expect((await call("/auth/refresh", { method: "POST", headers: { authorization: `Bearer ${old}` } })).status).toBe(401);
+  });
+});
+
 describe("ops", () => {
   it("is idempotent, cursored, per-user", async () => {
     const s = await login();

@@ -34,7 +34,10 @@ export interface ClientOptions {
   timeoutMs?: number;
   maxBytes?: number;
   publicOnly?: boolean;
+  /** Reports the core REST budget only (search and GraphQL have their own, smaller limits). */
   onRateLimit?: (r: RateLimit) => void;
+  /** Called once on a 401: return a new token to retry with, or null to give up. */
+  renewToken?: () => Promise<string | null>;
   /** ETag cache for conditional requests */
   cache?: Map<string, { etag: string; body: unknown }>;
 }
@@ -53,7 +56,33 @@ export class GitHubClient {
     return !!this.o.token;
   }
 
+  private renewing: Promise<string | null> | null = null;
+
+  /**
+   * After a 401 sent with `used`: true when a different token is now available to retry with.
+   * Concurrent 401s share one renewal, and a request that failed with a token that was already
+   * replaced retries with the current one instead of renewing again.
+   */
+  private async renewed(used: string | null | undefined): Promise<boolean> {
+    if (!this.o.renewToken || !used) return false;
+    if (this.o.token && this.o.token !== used) return true;
+    this.renewing ??= this.o.renewToken().catch(() => null).finally(() => (this.renewing = null));
+    const next = await this.renewing;
+    if (next && next !== this.o.token) this.o.token = next;
+    return !!this.o.token && this.o.token !== used;
+  }
+
   async request<T>(method: string, path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<T> {
+    const used = this.o.token;
+    try {
+      return await this.requestOnce<T>(method, path, body, extraHeaders);
+    } catch (e) {
+      if (e instanceof GitHubError && e.status === 401 && (await this.renewed(used))) return this.requestOnce<T>(method, path, body, extraHeaders);
+      throw e;
+    }
+  }
+
+  private async requestOnce<T>(method: string, path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<T> {
     if (!path.startsWith("/")) throw new Error("path must be relative");
     const url = this.baseUrl + path;
     const headers: Record<string, string> = {
@@ -77,7 +106,8 @@ export class GitHubClient {
       clearTimeout(timer);
     }
     const lim = res.headers.get("x-ratelimit-limit");
-    if (lim) {
+    const resource = res.headers.get("x-ratelimit-resource");
+    if (lim && (!resource || resource === "core")) {
       this.rate = {
         limit: Number(lim),
         remaining: Number(res.headers.get("x-ratelimit-remaining") ?? 0),
@@ -97,6 +127,16 @@ export class GitHubClient {
 
   /** Text responses (e.g. `.diff`). */
   async requestText(path: string, accept: string): Promise<string> {
+    const used = this.o.token;
+    try {
+      return await this.requestTextOnce(path, accept);
+    } catch (e) {
+      if (e instanceof GitHubError && e.status === 401 && (await this.renewed(used))) return this.requestTextOnce(path, accept);
+      throw e;
+    }
+  }
+
+  private async requestTextOnce(path: string, accept: string): Promise<string> {
     const headers: Record<string, string> = { Accept: accept, "X-GitHub-Api-Version": "2022-11-28" };
     if (this.o.token) headers.Authorization = `Bearer ${this.o.token}`;
     const ctl = new AbortController();
@@ -322,12 +362,89 @@ export class GitHubClient {
     return this.paginate(`/repos/${enc(owner)}/${enc(repo)}/labels`, 3);
   }
 
+  /* ---------------- Issues ---------------- */
+
+  /** Open (or all) issues, without the pull requests GitHub's issues endpoint also returns. */
+  async listIssues(owner: string, repo: string, state: "open" | "closed" | "all" = "open", maxPages = 3): Promise<IssueSnapshot[]> {
+    const raw = await this.paginate<RawIssue>(`/repos/${enc(owner)}/${enc(repo)}/issues?state=${state}&sort=updated`, maxPages);
+    return raw.filter((i) => !i.pull_request).map((i) => toIssueSnapshot(owner, repo, i));
+  }
+
+  /** One issue or PR by number; `isPull` tells which. */
+  async getIssue(owner: string, repo: string, n: number): Promise<IssueSnapshot & { isPull: boolean }> {
+    const raw = await this.request<RawIssue>("GET", `/repos/${enc(owner)}/${enc(repo)}/issues/${n}`);
+    return { ...toIssueSnapshot(owner, repo, raw), isPull: !!raw.pull_request };
+  }
+
+  async createIssue(owner: string, repo: string, issue: { title: string; body?: string; labels?: string[]; milestone?: number | null }): Promise<IssueSnapshot> {
+    return toIssueSnapshot(owner, repo, await this.request<RawIssue>("POST", `/repos/${enc(owner)}/${enc(repo)}/issues`, issue));
+  }
+
   milestones(owner: string, repo: string): Promise<{ number: number; title: string }[]> {
     return this.paginate(`/repos/${enc(owner)}/${enc(repo)}/milestones?state=open`, 2);
   }
 }
 
 /* ---------------- helpers & raw types ---------------- */
+
+export interface RawIssue {
+  number: number;
+  title: string;
+  body: string | null;
+  state: "open" | "closed";
+  state_reason?: string | null;
+  html_url: string;
+  user: { login: string } | null;
+  labels: (string | { name?: string })[];
+  assignees?: { login: string }[];
+  milestone: { title: string; number: number } | null;
+  comments: number;
+  created_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  pull_request?: unknown;
+}
+
+/** Cached issue metadata; key is `owner/repo#n` lowercased, like PR keys. */
+export interface IssueSnapshot {
+  key: string;
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  body: string | null;
+  state: "open" | "closed";
+  url: string;
+  author: string;
+  labels: string[];
+  assignees: string[];
+  milestone: string | null;
+  comments: number;
+  createdAt: string;
+  updatedAt: string;
+  fetchedAt: number;
+}
+
+export function toIssueSnapshot(owner: string, repo: string, i: RawIssue): IssueSnapshot {
+  return {
+    key: `${owner}/${repo}#${i.number}`.toLowerCase(),
+    owner,
+    repo,
+    number: i.number,
+    title: i.title,
+    body: i.body,
+    state: i.state,
+    url: i.html_url,
+    author: i.user?.login ?? "ghost",
+    labels: i.labels.map((l) => (typeof l === "string" ? l : l.name ?? "")).filter(Boolean),
+    assignees: (i.assignees ?? []).map((a) => a.login),
+    milestone: i.milestone?.title ?? null,
+    comments: i.comments,
+    createdAt: i.created_at,
+    updatedAt: i.updated_at,
+    fetchedAt: Date.now(),
+  };
+}
 
 function enc(s: string): string {
   return encodeURIComponent(s);

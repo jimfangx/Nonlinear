@@ -22,9 +22,21 @@ await A.getByRole("button", { name: "Connect with GitHub" }).click();
 await A.getByText("Connected as @maintainer").first().waitFor({ timeout: 20000 });
 check("A: Connect with one click (no URL/passphrase fields)", true);
 check("A: GitHub API routed through backend proxy", (await A.getByLabel("GitHub API base").inputValue()) === "http://localhost:8787/gh");
+// First connect creates the key and must show it until the user confirms saving it.
+const prompt = A.getByRole("dialog", { name: "Save your recovery key" });
+await prompt.waitFor({ timeout: 10000 });
+const rk = (await prompt.locator("code.mono").textContent())?.trim();
+check("A: recovery key shown on first connect", /^NL1-/.test(rk ?? ""));
+check("A: Done needs confirmation", await prompt.getByRole("button", { name: "Done" }).isDisabled());
+await prompt.getByRole("checkbox").check();
+await prompt.getByRole("button", { name: "Done" }).click();
+await prompt.waitFor({ state: "detached" });
+await A.waitForTimeout(300); // let the IndexedDB write land before reloading
+await A.reload();
+await A.getByRole("button", { name: "Sync now" }).waitFor();
+check("A: prompt stays dismissed once saved", (await A.getByRole("dialog", { name: "Save your recovery key" }).count()) === 0);
 await A.getByRole("button", { name: "Show recovery key" }).click();
-const rk = (await A.locator("code.mono").first().textContent())?.trim();
-check("A: recovery key available", /^NL1-/.test(rk ?? ""));
+check("A: Settings shows the same key", (await A.locator("code.mono").first().textContent())?.trim() === rk);
 await A.screenshot({ path: `${SHOTS}/cloud-A-connected.png` });
 
 // Device A creates a card and syncs
@@ -117,6 +129,45 @@ await C.getByPlaceholder("NL1-…").fill(rk);
 await C.getByRole("button", { name: "Use recovery key" }).click();
 await C.getByText("Connected as @maintainer").first().waitFor({ timeout: 10000 });
 check("C: recovery key connects a new device", true);
+
+// Lost key: A disconnects (deleting its key), reconnects, resets encryption. Its local data must be
+// uploaded under the new key, so a fresh device restores everything from the NEW recovery key alone.
+const cardsOnA = await A.evaluate(() => Object.values(window.__nl.getState().cards).filter((c) => !c.deleted).map((c) => c.title).sort());
+await A.goto(`${APP}/#/settings`);
+await A.getByRole("button", { name: "Disconnect", exact: true }).last().click();
+await A.getByRole("button", { name: "Connect with GitHub" }).click();
+await A.getByRole("button", { name: "Approve from another device" }).waitFor({ timeout: 20000 });
+check("D: a device without the key is asked to pair", true);
+await A.getByText("Lost all devices and the recovery key?").click();
+await A.getByRole("button", { name: "Reset cloud encryption" }).click();
+// In-app confirmation (window.confirm does nothing in the desktop webview).
+await A.getByRole("dialog", { name: "Reset cloud encryption?" }).getByRole("button", { name: "Reset and re-upload" }).click();
+await A.getByText(/New encryption key created\. Uploaded \d+ item/).waitFor({ timeout: 30000 });
+const uploaded = Number((await A.getByText(/Uploaded \d+ item/).first().textContent()).match(/Uploaded (\d+)/)[1]);
+const resetPrompt = A.getByRole("dialog", { name: "Save your recovery key" });
+await resetPrompt.waitFor({ timeout: 10000 });
+const newRk = (await resetPrompt.locator("code.mono").textContent())?.trim();
+check("D: reset shows a NEW recovery key", /^NL1-/.test(newRk ?? "") && newRk !== rk);
+check("D: reset uploads this device's data", uploaded >= cardsOnA.length && uploaded > 0, `${uploaded} items`);
+await resetPrompt.getByRole("checkbox").check();
+await resetPrompt.getByRole("button", { name: "Done" }).click();
+
+const E = await device();
+await E.goto(`${APP}/#/settings`);
+await E.getByRole("button", { name: "Connect with GitHub" }).click();
+await E.getByPlaceholder("NL1-…").fill(rk);
+await E.getByRole("button", { name: "Use recovery key" }).click();
+await E.getByText("That recovery key doesn't match this account.").waitFor({ timeout: 10000 });
+check("D: the old recovery key no longer works", true);
+await E.getByPlaceholder("NL1-…").fill(newRk);
+await E.getByRole("button", { name: "Use recovery key" }).click();
+await E.getByText("Connected as @maintainer").first().waitFor({ timeout: 10000 });
+await E.evaluate(() => localStorage.setItem("nl:test", "1"));
+await E.reload();
+await E.waitForTimeout(500);
+await syncNow(E);
+const cardsOnE = await E.evaluate(() => Object.values(window.__nl.getState().cards).filter((c) => !c.deleted).map((c) => c.title).sort());
+check("D: new device restores all cards with the new key", JSON.stringify(cardsOnE) === JSON.stringify(cardsOnA) && cardsOnA.length > 0, JSON.stringify(cardsOnE));
 
 console.log(failed ? `${failed} FAILED` : "all cloud checks passed");
 await browser.close();

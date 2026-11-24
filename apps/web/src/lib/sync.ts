@@ -6,7 +6,7 @@
 import { decryptOp, encryptOp, importSyncKey, referencesPrivateRepo, syncKeySalt, type EncryptedOp, type Op } from "@nonlinear/core";
 import { deleteRecord, getSecret, outboxAll, outboxRemove, putRecord, setSecret } from "./db";
 import { useApp, COLLECTIONS, type CollectionName, type SyncConflict } from "./store";
-import { DEFAULT_CLOUD_URL } from "./cloud";
+import { DEFAULT_CLOUD_URL, cloudFetch } from "./cloud";
 
 let keyCache: { raw: string; key: CryptoKey; salt: string } | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -65,13 +65,11 @@ export async function syncOnce(): Promise<{ pushed: number; pulled: number }> {
   if (!s.syncEnabled || !base) return { pushed: 0, pulled: 0 };
   const k = await key();
   if (!k) throw new Error("This device is not paired yet");
-  const session = await getSecret("sync-session");
-  const headers = { "content-type": "application/json", ...(session ? { authorization: `Bearer ${session}` } : {}) };
   const isPrivate = (r: string) => !!st.repos[r]?.private;
 
   // 1) pull first so remote ops based on an older state are judged against our *unpushed* edits
   const cursor = (await getSecret("sync-cursor")) ?? "0";
-  const r = await fetch(`${base}/v1/ops?since=${encodeURIComponent(cursor)}&device=${encodeURIComponent(s.deviceId)}`, { headers });
+  const r = await cloudFetch(`/v1/ops?since=${encodeURIComponent(cursor)}&device=${encodeURIComponent(s.deviceId)}`);
   if (!r.ok) throw new Error(`Sync pull failed: HTTP ${r.status}`);
   const { ops: remote, cursor: next } = (await r.json()) as { ops: EncryptedOp[]; cursor: string };
   let pulled = 0;
@@ -115,7 +113,7 @@ export async function syncOnce(): Promise<{ pushed: number; pulled: number }> {
   const safe = ops.filter((o) => !(s.publicOnly && referencesPrivateRepo(o.payload, isPrivate)));
   const enc = await Promise.all(safe.map((o) => encryptOp(o, k.key, k.salt)));
   if (enc.length) {
-    const pr = await fetch(`${base}/v1/ops`, { method: "POST", headers, body: JSON.stringify({ ops: enc }) });
+    const pr = await cloudFetch("/v1/ops", { method: "POST", body: JSON.stringify({ ops: enc }) });
     if (!pr.ok) throw new Error(`Sync push failed: HTTP ${pr.status}`);
   }
   await outboxRemove(ops.map((o) => o.opId));

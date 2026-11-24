@@ -10,7 +10,7 @@ import { gitlinksAt, remoteGitRefs, remoteGitLog, usesGitTransport } from "../li
 import { isDesktop, invoke } from "../lib/platform";
 import { availableSources, gitDiff, gitGitlinks, gitLog, gitRefs, sourceLabel, type Source } from "../lib/sources";
 import { CommitDiff } from "../components/CommitDiff";
-import { Modal, timeAgo, Split } from "../components/ui";
+import { askConfirm, Modal, timeAgo, Split } from "../components/ui";
 
 const LANE_W = 14;
 const ROW_H = 28;
@@ -376,7 +376,7 @@ function CommitDetail({ repoKey, c, refs, local, src }: { repoKey: string; c: Co
           disabled={!isDesktop() || !local}
           title={!isDesktop() ? "Requires the desktop app with an explicit working tree" : "Detached checkout (non-destructive; asks first)"}
           onClick={async () => {
-            if (!local || !confirm(`Checkout ${c.sha.slice(0, 8)} (detached) in ${local}? Uncommitted changes block this.`)) return;
+            if (!local || !(await askConfirm({ title: "Check out this commit?", body: `Check out ${c.sha.slice(0, 8)} (detached) in ${local}? Uncommitted changes block this.`, confirmLabel: "Check out" }))) return;
             try {
               await invoke("git_checkout_detached", { repoPath: local, rev: c.sha });
               toast("success", "Checked out (detached)");

@@ -54,7 +54,35 @@
     <div class="notes">
 
       <article class="rel">
-        <div class="rel-meta"><span class="rel-ver">0.1.16</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div class="rel-meta"><span class="rel-ver">0.1.17</span><span class="rel-date">November 23, 2026</span><span class="rel-tag">Latest</span></div>
+        <div>
+          <h4>New</h4>
+          <ul>
+            <li><b>Issues in the Inbox.</b> A new Issues tab lists open issues across the view's repositories, with details, comments and milestone editing.</li>
+            <li><b>Edit a PR's milestone</b> from its details in the Inbox.</li>
+            <li><b>Board: link by number.</b> Type <code>#2345</code> to link a PR or issue from the card's repositories. Linking fills in the repository, and the title if the card still has the default one. Cards now have a Linked issues section.</li>
+            <li><b>Board: create a card as a GitHub issue</b> in a repository you pick, with the card's title and description.</li>
+          </ul>
+          <h4>Improved</h4>
+          <ul>
+            <li>Board: <kbd>N</kbd> selects the new card's title so you can type straight away, and <kbd>⌘</kbd><kbd>Enter</kbd> saves and closes a card.</li>
+            <li>Timeline: release pin handles are easier to grab, and clicking one lets the arrow keys move it right away.</li>
+            <li>Sign-in renews itself instead of failing, and the first Connect shows your recovery key and asks you to confirm you've saved it.</li>
+            <li>Resetting cloud encryption re-uploads everything on this device under the new key, and Disconnect warns before removing a key you haven't saved.</li>
+          </ul>
+          <h4>Fixed</h4>
+          <ul>
+            <li>“Sync pull failed: HTTP 401” after half a day: sign-ins to Nonlinear Cloud no longer expire after 12 hours.</li>
+            <li>The GitHub API counter no longer shows GitHub's search limit (/30) instead of your hourly limit.</li>
+            <li>Scrolling over the submodule/pin column of the timeline now scrolls the timeline.</li>
+            <li>“GitHub authentication required or expired” on some repositories right after the sign-in renewed itself.</li>
+            <li>In the desktop app, Reset cloud encryption, Disconnect and Git Graph's checkout did nothing because their confirmation never appeared. They now use an in-app dialog.</li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="rel">
+        <div class="rel-meta"><span class="rel-ver">0.1.16</span><span class="rel-date">November 23, 2026</span></div>
         <div>
           <h4>New</h4>
           <ul>

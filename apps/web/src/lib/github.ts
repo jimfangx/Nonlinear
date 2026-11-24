@@ -17,6 +17,7 @@ import {
   type Capability,
   type ManagedBlockContent,
   type PRSnapshot,
+  type IssueSnapshot,
   type RawRepo,
   type RepoInfo,
   type Intention,
@@ -49,6 +50,7 @@ const DIRECT_API = "https://api.github.com";
 /** Organizations (lower-case) that refused the OAuth app this session; their calls go straight to the fallback token. */
 export const oauthRestrictedOrgs = new Set<string>();
 let clientFallback: string | null | undefined;
+let lastRenewAt = 0;
 
 /** Repository owner a REST path refers to, if any. */
 function ownerOfPath(path: string): string | null {
@@ -96,7 +98,21 @@ export async function githubApi(): Promise<GitHubClient> {
     clientToken = token;
     clientFallback = fallback;
     const onRateLimit = (r: RateLimit) => useApp.setState({ rateLimit: r });
-    const primary = new GitHubClient({ token, baseUrl: base, publicOnly: s.publicOnly, cache: etagCache, onRateLimit });
+    // Through the sync server the token is the session: renew it on 401 instead of failing.
+    const renewToken = viaOAuth
+      ? async () => {
+          // Sync (or another window) may already have rotated the session: use the stored one first.
+          const stored = (await getSecret("github-token")) ?? null;
+          if (stored && stored !== clientToken) return (clientToken = stored);
+          // A 401 right after a renewal comes from GitHub itself (revoked grant), not the session.
+          if (Date.now() - lastRenewAt < 60_000) return null;
+          lastRenewAt = Date.now();
+          const fresh = await (await import("./cloud")).renewSession();
+          if (fresh) clientToken = fresh;
+          return fresh;
+        }
+      : undefined;
+    const primary = new GitHubClient({ token, baseUrl: base, publicOnly: s.publicOnly, cache: etagCache, onRateLimit, renewToken });
     if (fallback) {
       // Same conditional-request cache: entries are keyed by full URL, so proxy and direct responses never mix.
       const direct = new GitHubClient({ token: fallback, baseUrl: DIRECT_API, publicOnly: s.publicOnly, cache: etagCache, onRateLimit });
@@ -524,5 +540,64 @@ export async function updatePRFields(prKey: string, patch: { title?: string; bod
     if (patch.milestone !== undefined) await c.setMilestone(r.owner, r.repo, r.number, patch.milestone);
     if (patch.reviewers?.length) await c.requestReviewers(r.owner, r.repo, r.number, patch.reviewers);
     return enrichPR(prKey);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Issues                                                              */
+/* ------------------------------------------------------------------ */
+
+/** Fetch open issues for these repositories into the local cache (closed ones drop out). */
+export async function refreshIssues(repos: string[], onProgress?: (p: RefreshProgress) => void): Promise<RefreshProgress> {
+  const c = await githubApi();
+  const prog: RefreshProgress = { done: 0, total: repos.length, errors: [] };
+  await pool(repos, 4, async (repoKey) => {
+    const [owner, repo] = repoKey.split("/") as [string, string];
+    try {
+      const fresh = await c.listIssues(owner, repo, "open", 2);
+      const st = useApp.getState();
+      const keep = new Set(fresh.map((i) => i.key));
+      for (const old of Object.values(st.issues)) {
+        if (`${old.owner}/${old.repo}`.toLowerCase() === repoKey.toLowerCase() && old.state === "open" && !keep.has(old.key)) st.remove("issues", old.key);
+      }
+      st.putMany("issues", fresh.map((i) => [i.key, i]));
+    } catch (e) {
+      prog.errors.push(`${repoKey}: ${describeError(e)}`);
+    }
+    prog.done++;
+    onProgress?.({ ...prog });
+  });
+  return prog;
+}
+
+/** Look up `owner/repo#n` as an issue or PR (one request); PRs are also stored as PR snapshots. */
+export async function lookupNumber(repoKey: string, n: number): Promise<{ kind: "pr"; key: string; title: string } | { kind: "issue"; issue: IssueSnapshot } | null> {
+  const [owner, repo] = repoKey.split("/") as [string, string];
+  const key = `${repoKey}#${n}`.toLowerCase();
+  const st = useApp.getState();
+  if (st.prs[key]) return { kind: "pr", key, title: st.prs[key]!.title };
+  if (st.issues[key]) return { kind: "issue", issue: st.issues[key]! };
+  if (!st.online) return null;
+  try {
+    const found = await (await githubApi()).getIssue(owner, repo, n);
+    if (found.isPull) {
+      void ensurePR(key);
+      return { kind: "pr", key, title: found.title };
+    }
+    const { isPull: _isPull, ...issue } = found;
+    useApp.getState().put("issues", issue.key, issue);
+    return { kind: "issue", issue };
+  } catch {
+    return null;
+  }
+}
+
+/** Open an issue upstream (staged in safe mode; needs a token that can write public repos). */
+export async function createIssue(repoKey: string, title: string, body: string) {
+  const [owner, repo] = repoKey.split("/") as [string, string];
+  return guardedRepoWrite(repoKey, "can-review", "create-issue", { repo: repoKey, title, body }, async () => {
+    const issue = await (await githubApi()).createIssue(owner, repo, { title, body });
+    useApp.getState().put("issues", issue.key, issue);
+    return issue;
   });
 }

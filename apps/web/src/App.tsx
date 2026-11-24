@@ -3,7 +3,7 @@ import { HashRouter, NavLink, Navigate, Route, Routes, useLocation, useNavigate,
 import { useApp, useSettings } from "./lib/store";
 import { CommandPalette } from "./components/CommandPalette";
 import { CloudGlue } from "./components/CloudGlue";
-import { Modal, Toasts, timeAgo } from "./components/ui";
+import { ConfirmHost, Modal, Toasts, timeAgo } from "./components/ui";
 import { keyLabel, useActions } from "./lib/keys";
 const Inbox = lazy(() => import("./workspaces/Inbox").then((m) => ({ default: m.Inbox })));
 const ReviewHome = lazy(() => import("./workspaces/Review").then((m) => ({ default: m.ReviewHome })));
@@ -189,6 +189,7 @@ function Shell() {
         <StatusLegend />
       </Modal>
       <CloudGlue />
+      <ConfirmHost />
       <ThemeLayer />
       <Toasts />
     </div>

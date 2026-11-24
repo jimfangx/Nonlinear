@@ -5,7 +5,7 @@
  * Never auto-posted; never silently retried after partial failure.
  */
 
-export type IntentionKind = "comment" | "review" | "update-body" | "labels" | "milestone" | "reviewers" | "chain-block" | "lgtm" | "review-start" | "release-pr";
+export type IntentionKind = "comment" | "review" | "update-body" | "labels" | "milestone" | "reviewers" | "chain-block" | "lgtm" | "review-start" | "release-pr" | "create-issue";
 
 export interface Intention {
   id: string;

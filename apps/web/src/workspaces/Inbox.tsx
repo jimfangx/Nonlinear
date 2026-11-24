@@ -5,7 +5,8 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { CATEGORY_LABELS, prPercentReviewed, summarizeEvents, classify, isSnoozed, isUnread, newId, type Category, type PRSnapshot } from "@nonlinear/core";
 import { useApp, useSettings, type RepositoryView } from "../lib/store";
 import { findSubmoduleRepos } from "../lib/submodules";
-import { refreshRepos, describeError } from "../lib/github";
+import { refreshRepos, refreshIssues, describeError } from "../lib/github";
+import { IssueList, IssueDetail } from "./InboxIssues";
 import { useChainGraph, blockedSet, hydrateChain } from "../lib/chains";
 import { useActions } from "../lib/keys";
 import { RepoPicker } from "../components/RepoPicker";
@@ -41,7 +42,7 @@ export function Inbox() {
   if (!view && requested) {
     return <div className="inbox-layout inbox-without-view">
       <aside className="empty">Create a repository view to populate the Inbox.</aside>
-      <InboxDetail prKey={requested} close={() => nav("/inbox", { replace: true })} />
+      <InboxDetail itemKey={requested} close={() => nav("/inbox", { replace: true })} />
       {editor}
     </div>;
   }
@@ -78,10 +79,23 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
   const put = useApp((s) => s.put);
   const patch = useApp((s) => s.patch);
   const toast = useApp((s) => s.toast);
-  const [, setParams] = useSearchParams();
+  const [params, setParams] = useSearchParams();
   const { graph } = useChainGraph();
   const [q, setQ] = useState("");
-  const [cat, setCat] = useState<Category>((view.category as Category) ?? "all-open");
+  const [cat, setCat] = useState<Category>(view.category === "issues" ? "all-open" : ((view.category as Category) ?? "all-open"));
+  const [showIssues, setShowIssues] = useState(view.category === "issues");
+  const currentIssue = params.get("issue");
+  const issues = useApp((s) => s.issues);
+  const issueCount = useMemo(() => {
+    const set = new Set(view.repos.map((r) => r.toLowerCase()));
+    return Object.values(issues).filter((i) => i.state === "open" && set.has(`${i.owner}/${i.repo}`.toLowerCase())).length;
+  }, [issues, view.repos]);
+  const selectIssue = (key: string | null) => setParams((existing) => {
+    const next = new URLSearchParams(existing);
+    if (key) next.set("issue", key);
+    else next.delete("issue");
+    return next;
+  }, { replace: true });
   const [showSnoozed, setShowSnoozed] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<string | null>(null);
@@ -192,6 +206,8 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
     try {
       const r = await refreshRepos(targets, (p) => setBusy(`Refreshing ${p.done}/${p.total}…`));
       if (r.errors.length) toast("warn", r.errors.slice(0, 3).join("\n"));
+      const ri = await refreshIssues(targets);
+      if (ri.errors.length && !r.errors.length) toast("warn", ri.errors.slice(0, 3).join("\n"));
     } catch (e) {
       toast("error", describeError(e));
     } finally {
@@ -349,18 +365,21 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
         <button className="btn sm" onClick={onEdit}>
           Edit view
         </button>
-        <input className="input" style={{ width: 240 }} data-workspace-search placeholder="Filter PRs…" value={q} onChange={(e) => setQ(e.target.value)} />
+        <input className="input" style={{ width: 240 }} data-workspace-search placeholder={showIssues ? "Filter issues…" : "Filter PRs…"} value={q} onChange={(e) => setQ(e.target.value)} />
+        {!showIssues && <>
         <select className="input" value={view.groupBy} onChange={(e) => patch("views", view.id, { groupBy: e.target.value as RepositoryView["groupBy"] })} aria-label="Group by">
           <option value="none">No grouping</option>
           <option value="repo">Group by repository</option>
           <option value="chain">Group by chain</option>
           <option value="release">Group by release</option>
         </select>
+        </>}
         <select className="input" value={view.sort} onChange={(e) => patch("views", view.id, { sort: e.target.value as RepositoryView["sort"] })} aria-label="Sort">
           <option value="updated">Recently updated</option>
           <option value="created">Newest</option>
           <option value="repo">Repository</option>
         </select>
+        {!showIssues && <>
         <select className="input" value={view.releaseLens ?? ""} onChange={(e) => patch("views", view.id, { releaseLens: e.target.value || null })} aria-label="Release lens" title="Show only pull requests attached to cards in this release, plus their direct prerequisites.">
           <option value="">No release filter</option>
           {Object.values(releases).map((r) => (
@@ -372,11 +391,12 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
         <label className="row small">
           <input type="checkbox" checked={showSnoozed} onChange={(e) => setShowSnoozed(e.target.checked)} /> snoozed
         </label>
+        </>}
         <span className="spacer" />
         {selected.size > 0 && <span className="small muted">{selected.size} selected</span>}
-        <button className="btn sm" onClick={() => bulk((k) => put("prLocal", k, { ...prLocal[k], pinned: !prLocal[k]?.pinned }))}>
+        {!showIssues && <button className="btn sm" onClick={() => bulk((k) => put("prLocal", k, { ...prLocal[k], pinned: !prLocal[k]?.pinned }))}>
           <NavIcon name="pin" /> Pin
-        </button>
+        </button>}
         <span className="faint small">{newest ? `fetched ${timeAgo(newest)}` : "never fetched"}</span>
         <button className="btn sm" disabled={!!busy} onClick={() => void refresh()}>
           {busy ?? "↻ Refresh"}
@@ -387,10 +407,12 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
           <button
             key={c}
             role="tab"
-            aria-selected={cat === c}
-            className={`tab ${cat === c ? "active" : ""}`}
+            aria-selected={!showIssues && cat === c}
+            className={`tab ${!showIssues && cat === c ? "active" : ""}`}
             onClick={() => {
               setCat(c);
+              setShowIssues(false);
+              selectIssue(null);
               selectPR(null);
               patch("views", view.id, { category: c });
             }}
@@ -398,18 +420,33 @@ function InboxView({ view, onEdit, requested }: { view: RepositoryView; onEdit: 
             {CATEGORY_LABELS[c]} <span className="faint">{counts.get(c) ?? 0}</span>
           </button>
         ))}
+        <button role="tab" aria-selected={showIssues} className={`tab inbox-issues-tab ${showIssues ? "active" : ""}`} onClick={() => {
+          setShowIssues(true);
+          selectPR(null);
+          patch("views", view.id, { category: "issues" });
+          if (!issueCount && useApp.getState().online) void refreshIssues(view.repos);
+        }}>
+          Issues <span className="faint">{issueCount}</span>
+        </button>
       </div>
       <div className="inbox-layout">
-        <Split id="inbox" initial={0.46} showSecond={!!current}>
-          {listPane}
-          {current && <InboxDetail prKey={current} close={() => selectPR(null)} />}
-        </Split>
+        {showIssues ? (
+          <Split id="inbox" initial={0.46} showSecond={!!currentIssue}>
+            <IssueList repos={view.repos} query={q} current={currentIssue} onSelect={selectIssue} sort={view.sort} />
+            {currentIssue && <InboxDetail itemKey={currentIssue} kind="issue" close={() => selectIssue(null)} />}
+          </Split>
+        ) : (
+          <Split id="inbox" initial={0.46} showSecond={!!current}>
+            {listPane}
+            {current && <InboxDetail itemKey={current} close={() => selectPR(null)} />}
+          </Split>
+        )}
       </div>
     </>
   );
 }
 
-function InboxDetail({ prKey, close }: { prKey: string; close: () => void }) {
+function InboxDetail({ itemKey, kind = "pr", close }: { itemKey: string; kind?: "pr" | "issue"; close: () => void }) {
   const ref = useRef<HTMLElement>(null);
   const closeDetail = useCallback(() => {
     const pane = ref.current;
@@ -428,9 +465,10 @@ function InboxDetail({ prKey, close }: { prKey: string; close: () => void }) {
     window.addEventListener("keydown", dismiss);
     return () => window.removeEventListener("keydown", dismiss);
   }, [closeDetail]);
-  return <section ref={ref} className="inbox-detail" aria-label="Pull request details">
-    <div className="inbox-detail-header"><span>Pull request details</span><button className="btn ghost sm" onClick={closeDetail} aria-label="Close pull request details" title="Close pull request details">✕</button></div>
-    <PRDetail key={prKey} prKey={prKey} />
+  const what = kind === "pr" ? "Pull request details" : "Issue details";
+  return <section ref={ref} className="inbox-detail" aria-label={what}>
+    <div className="inbox-detail-header"><span>{what}</span><button className="btn ghost sm" onClick={closeDetail} aria-label={`Close ${what.toLowerCase()}`} title={`Close ${what.toLowerCase()}`}>✕</button></div>
+    {kind === "pr" ? <PRDetail key={itemKey} prKey={itemKey} /> : <IssueDetail key={itemKey} issueKey={itemKey} />}
   </section>;
 }
 

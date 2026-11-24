@@ -273,7 +273,7 @@ table.grid th { font-weight: 600; color: var(--text-2); font-size: 12px; }
 /* ---------- timeline ---------- */
 .tl { position: relative; font-size: 12px; overflow-anchor: none; overscroll-behavior: none; }
 .tl-row { display: flex; border-bottom: 1px solid var(--border); }
-.tl-label { width: 260px; flex: none; position: sticky; left: 0; z-index: 3; background: var(--panel); border-right: 1px solid var(--border); padding: 1px 8px; line-height: 1.25; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
+.tl-label { width: 260px; flex: none; position: sticky; left: 0; z-index: 3; background: var(--panel); border-right: 1px solid var(--border); padding: 1px 8px; line-height: 1.25; display: flex; flex-direction: column; justify-content: center; overflow: clip; }
 .tl-axis { height: 42px; position: sticky; top: 0; z-index: 4; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; }
 .tl-canvas { position: relative; flex: none; }
 
@@ -628,3 +628,8 @@ html.has-bg .selection-slot { background: color-mix(in srgb, var(--panel) 86%, t
 .ask-picker select { min-width: 0; }
 .inbox-empty-repos { padding: 8px 12px; border-top: 1px solid var(--border); }
 html.has-bg .selection-slot .selection-bar { background: color-mix(in srgb, var(--accent-2) 92%, transparent); }
+.board-upstream { flex-wrap: wrap; gap: 6px; }
+.tl-release-handle { position: absolute; top: 0; z-index: 3; display: flex; align-items: center; justify-content: center; outline: none; touch-action: none; }
+.tl-release-handle-mark { width: 12px; height: 24px; border-radius: 3px; border: 2px solid var(--release-color); transition: transform .1s, box-shadow .1s; pointer-events: none; }
+.tl-release-handle.editable:hover .tl-release-handle-mark { transform: scaleX(1.25); }
+.tl-release-handle:focus-visible .tl-release-handle-mark, .tl-release-handle.editable:focus .tl-release-handle-mark { box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent); transform: scaleX(1.25); }

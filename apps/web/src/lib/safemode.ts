@@ -102,5 +102,7 @@ export function describe(kind: IntentionKind, prKey: string | null, p: Record<st
     }
     case "release-pr":
       return { title: `Create a branch and draft PR in ${str(p.repo)}`, preview: str(p.summary) };
+    case "create-issue":
+      return { title: `Open an issue in ${str(p.repo)}`, preview: `${str(p.title)}\n\n${str(p.body)}` };
   }
 }

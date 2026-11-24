@@ -21,7 +21,7 @@ import {
   type PairingKeypair,
 } from "@nonlinear/core";
 import { getSecret, setSecret } from "./db";
-import { useApp } from "./store";
+import { republishAll, useApp } from "./store";
 import { resetClient } from "./github";
 import { invoke, isDesktop } from "./platform";
 
@@ -33,12 +33,81 @@ export function cloudUrl(): string {
   return useApp.getState().settings_().syncUrl.trim().replace(/\/+$/, "") || DEFAULT_CLOUD_URL;
 }
 
+let renewing: Promise<string | null> | null = null;
+let reconnectStarted = false;
+let lastReconnectAt = 0;
+
+/**
+ * Exchange the current session (live or recently expired) for a fresh one. Runs once even when
+ * many calls hit 401 together. If the server can't renew it, sign in again: on desktop the system
+ * browser round-trip happens automatically (GitHub skips the consent screen for an app already
+ * authorized); on the web, a toast asks for one click because it navigates away.
+ */
+export function renewSession(): Promise<string | null> {
+  renewing ??= (async () => {
+    const old = await getSecret("sync-session");
+    const base = cloudUrl();
+    if (!old || !base) return null;
+    try {
+      const r = await fetch(`${base}/auth/refresh`, { method: "POST", headers: { authorization: `Bearer ${old}` } });
+      if (r.ok) {
+        const { session, login, scopes } = (await r.json()) as { session: string; login: string; scopes: string };
+        await setSecret("sync-session", session);
+        if (useApp.getState().settings_().authMode === "oauth") await setSecret("github-token", session);
+        useApp.getState().setSettings({ me: login, tokenCanWrite: scopes.split(",").includes("public_repo"), lastSyncError: null });
+        return session;
+      }
+      // 401: the server can't renew it. 404: a server without /auth/refresh (older deployment). Otherwise retry later.
+      if (r.status !== 401 && r.status !== 404) return null;
+    } catch {
+      return null; // offline
+    }
+    void reconnect();
+    return null;
+  })().finally(() => setTimeout(() => (renewing = null), 5_000));
+  return renewing;
+}
+
+async function reconnect(): Promise<void> {
+  // At most one automatic sign-in per 30 minutes, so an ignored browser tab doesn't keep reopening.
+  if (reconnectStarted || Date.now() - lastReconnectAt < 30 * 60_000) return;
+  reconnectStarted = true;
+  lastReconnectAt = Date.now();
+  const st = useApp.getState();
+  const writes = st.settings_().tokenCanWrite;
+  if (!isDesktop()) {
+    st.toast("warn", "Your Nonlinear Cloud sign-in ended. Open Settings → Nonlinear Cloud and click Connect to renew it.");
+    return;
+  }
+  st.toast("info", "Renewing your GitHub sign-in in the browser…");
+  try {
+    await connect(writes);
+    st.toast("success", "Sign-in renewed.");
+  } catch (e) {
+    st.toast("error", `Couldn't renew the sign-in: ${(e as Error).message}`);
+  } finally {
+    reconnectStarted = false;
+  }
+}
+
+/** fetch() against the cloud with the session; renews it and retries once on 401. */
+export async function cloudFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const go = (session: string | null) =>
+    fetch(`${cloudUrl()}${path}`, {
+      ...init,
+      headers: { "content-type": "application/json", ...(session ? { authorization: `Bearer ${session}` } : {}), ...(init.headers ?? {}) },
+    });
+  const session = (await getSecret("sync-session")) ?? null;
+  const r = await go(session);
+  if (r.status !== 401 || !session) return r;
+  // Renewed meanwhile (by the GitHub client or another window): retry with that one instead of rotating again.
+  const stored = (await getSecret("sync-session")) ?? null;
+  const fresh = stored && stored !== session ? stored : await renewSession();
+  return fresh ? go(fresh) : r;
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const session = await getSecret("sync-session");
-  const r = await fetch(`${cloudUrl()}${path}`, {
-    ...init,
-    headers: { "content-type": "application/json", ...(session ? { authorization: `Bearer ${session}` } : {}), ...(init.headers ?? {}) },
-  });
+  const r = await cloudFetch(path, init);
   const j = (await r.json().catch(() => ({}))) as T & { error?: string };
   if (!r.ok) throw Object.assign(new Error(j.error ?? `HTTP ${r.status}`), { status: r.status });
   return j;
@@ -132,8 +201,8 @@ export async function ensureKey(login: string): Promise<CloudState> {
   if (!keycheck) {
     const key = local ?? generateSyncKey();
     await api("/v1/keycheck", { method: "PUT", body: JSON.stringify({ keycheck: await makeKeyCheck(key) }) });
-    await activate(key);
-    useApp.getState().toast("success", "Connected. Save your recovery key from Settings → Nonlinear Cloud.");
+    // New key: CloudGlue shows the recovery key and asks the user to confirm saving it.
+    await activate(key, { saved: false });
     return { kind: "connected", login };
   }
   if (local && (await verifyKeyCheck(local, keycheck))) {
@@ -143,8 +212,11 @@ export async function ensureKey(login: string): Promise<CloudState> {
   return { kind: "needs-key", login };
 }
 
-async function activate(key: string): Promise<void> {
+async function activate(key: string, opts: { saved?: boolean } = {}): Promise<void> {
   await setSecret("sync-key", key);
+  // A key received by pairing or typed in as a recovery key is already saved somewhere; a new one isn't.
+  if (opts.saved) useApp.getState().setSettings({ recoveryKeySavedAt: Date.now() });
+  else if (opts.saved === false) useApp.getState().setSettings({ recoveryKeySavedAt: null });
   useApp.getState().setSettings({ syncEnabled: true, syncUrl: useApp.getState().settings_().syncUrl || DEFAULT_CLOUD_URL });
 }
 
@@ -162,7 +234,7 @@ export async function requestPairing(onApproved: () => void): Promise<{ code: st
         const key = await unwrapFromApprover(kp, r.wrapped!, r.approverPub!);
         const { keycheck } = await api<{ keycheck: string | null }>("/v1/keycheck");
         if (!keycheck || !(await verifyKeyCheck(key, keycheck))) throw new Error("Received key failed verification");
-        await activate(key);
+        await activate(key, { saved: true });
         onApproved();
         return;
       }
@@ -181,16 +253,27 @@ export async function applyRecoveryKey(rk: string): Promise<boolean> {
   if (!key) return false;
   const { keycheck } = await api<{ keycheck: string | null }>("/v1/keycheck");
   if (!keycheck || !(await verifyKeyCheck(key, keycheck))) return false;
-  await activate(key);
+  await activate(key, { saved: true });
   return true;
 }
 
 /** Lost every device and the recovery key: start over (server deletes old ciphertext). */
-export async function resetEncryption(): Promise<void> {
+export async function resetEncryption(): Promise<{ uploaded: number }> {
   const key = generateSyncKey();
   await api("/v1/keycheck", { method: "PUT", body: JSON.stringify({ keycheck: await makeKeyCheck(key), reset: true }) });
   await setSecret("sync-cursor", "0");
-  await activate(key);
+  await activate(key, { saved: false });
+  // The server deleted everything encrypted with the old key: upload this device's data under the new one.
+  const queued = republishAll();
+  const { syncOnce } = await import("./sync");
+  let uploaded = 0;
+  for (let i = 0; i < 500; i++) {
+    const { pushed } = await syncOnce();
+    uploaded += pushed;
+    if (pushed === 0) break;
+  }
+  useApp.getState().setSettings({ lastSyncAt: Date.now(), lastSyncError: null });
+  return { uploaded: Math.min(uploaded, queued) };
 }
 
 export async function recoveryKey(): Promise<string | null> {

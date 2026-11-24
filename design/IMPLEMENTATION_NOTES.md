@@ -139,3 +139,9 @@ Tauri's own DMG step can fail with `hdiutil: couldn't unmount … Resource busy`
 
 ## Remaining items
 None known. The user waived the manual VoiceOver/NVDA pass. Live GitHub writes and the Claude Code adapter are verified.
+
+## Session renewal and rate counter (2026-11-23)
+- Worker sessions slide: 30-day TTL, extended on use (at most hourly). `POST /auth/refresh` swaps a live or recently expired session (60-day grace) for a new secret and retires the old one. Sessions used to expire after 12 h, so the app hit `Sync pull failed: HTTP 401`.
+- Client: `cloudFetch()` (`lib/cloud.ts`) and the GitHub client's `renewToken` hook retry once after `renewSession()`. If the server can't renew (401/404), desktop re-runs the browser sign-in automatically (once per 30 min). The web build shows a toast instead, because signing in navigates away.
+- The top-bar counter reports only `x-ratelimit-resource: core`. Search responses (limit 30/min) used to overwrite it. The Worker proxy now forwards and exposes that header.
+- Issues: `issues` cache collection, Inbox → Issues tab (`workspaces/InboxIssues.tsx`), card `issues?: string[]`, "Create as GitHub issue" on cards (`create-issue` intention kind, staged in safe mode).

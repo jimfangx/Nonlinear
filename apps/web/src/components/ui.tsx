@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import type { PRSnapshot, EdgeSyncStatus } from "@nonlinear/core";
 import { useApp } from "../lib/store";
 
@@ -144,7 +145,10 @@ export function Modal({ title, onClose, children, footer, wide, open: openProp }
     return () => window.removeEventListener("keydown", k);
   }, [onClose, open, closing]);
   if (!present) return null;
-  return (
+  // Portaled to <body>: an ancestor with backdrop-filter/transform (e.g. the
+  // top bar when a background image is set) would otherwise trap the fixed
+  // overlay inside its own box and stacking context.
+  return createPortal(
     <div ref={overlay} className="overlay" data-closing={(!open || closing) || undefined} inert={!open || closing} onMouseDown={(e) => e.target === e.currentTarget && dismiss()}>
       <div className="modal" role="dialog" aria-modal="true" aria-labelledby={titleId} style={wide ? { width: "min(960px, 94vw)" } : undefined}>
         <div className="head">
@@ -156,7 +160,8 @@ export function Modal({ title, onClose, children, footer, wide, open: openProp }
         <div className="body">{children}</div>
         {footer && <div className="foot">{footer}</div>}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
